@@ -141,6 +141,26 @@
     "hint": "生成日记时参考前几天的日记内容，0表示不参考，1表示参考前1天，以此类推。",
     "default": 0
   },
+  "diary_auto_recall": {
+    "description": "是否自动撤回日记",
+    "type": "bool",
+    "hint": "开启后，发送日记消息后会在设定时间后自动撤回。",
+    "default": false
+  },
+  "diary_recall_time": {
+    "description": "日记自动撤回时间（秒）",
+    "type": "int",
+    "hint": "发送日记消息后多少秒自动撤回，默认30秒。",
+    "default": 30
+  },
+  "diary_response_prompt": {
+    "description": "日记被偷看回应提示词",
+    "type": "text",
+    "hint": "当用户查看日记时，用于生成相应回应的提示词。",
+    "default": "你发现用户居然偷看了你写的用户观察日记，给予相应回应。",
+    "editor_mode": true,
+    "editor_language": "text"
+  },
   "admin_qq": {
     "description": "管理员QQ号",
     "type": "string",
