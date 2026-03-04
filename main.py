@@ -931,13 +931,13 @@ class ScreenCompanion(Star):
                 logger.debug(f"Base64 data length: {len(base64_data)} characters")
 
             # 第一阶段：屏幕识别（外接 API / 框架视觉 / 外接+框架回退）
-            vision_source = self.config.get("vision_source", "external")
+            vision_source = self.config.get("vision_source", "仅外接")
             recognition_text = ""
-            if vision_source == "framework":
+            if vision_source == "仅框架":
                 logger.info("使用框架视觉模型进行屏幕识别")
                 recognition_text = await self._call_framework_vision(image_bytes, session)
                 logger.info(f"框架视觉识别结果: {recognition_text[:200] if recognition_text else '(空)'}...")
-            elif vision_source == "external_then_framework":
+            elif vision_source == "外接+框架回退":
                 recognition_text = await self._call_framework_vision(image_bytes, session)
                 if not (recognition_text and recognition_text.strip()):
                     logger.info("框架视觉未返回有效结果，回退到外接视觉API")
@@ -945,7 +945,7 @@ class ScreenCompanion(Star):
                 else:
                     logger.info("使用框架视觉模型识别结果")
             else:
-                # "external" 或未配置
+                # "仅外接" 或未配置
                 logger.info("使用外接视觉API进行屏幕识别")
                 recognition_text = await self._call_external_vision_api(image_bytes)
                 logger.info(f"外接API识别结果: {recognition_text[:200] if recognition_text else '(空)'}...")

@@ -145,11 +145,11 @@
     "description": "屏幕识别视觉来源",
     "type": "string",
     "hint": "仅外接：只用下方配置的外接视觉 API。仅框架：只用 AstrBot 的「默认图片转述模型」或当前对话模型（需支持多模态），请在提供方设置中配置。外接+框架回退：优先用框架视觉，失败时再用外接 API。",
-    "default": "external",
+    "default": "仅外接",
     "options": [
-      "external",
-      "framework",
-      "external_then_framework"
+      "仅外接",
+      "仅框架",
+      "外接+框架回退"
     ],
     "condition": {
       "enabled": true
