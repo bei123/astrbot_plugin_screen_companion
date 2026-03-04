@@ -3,6 +3,7 @@ import base64
 import datetime
 import io
 import json
+import re
 import os
 import shutil
 import sys
@@ -434,6 +435,78 @@ class ScreenCompanion(Star):
             return (b"", "未收到远程截图")
         return (bytes(self._latest_remote_image_bytes), self._latest_remote_window_title)
 
+    def _normalize_send_target(self, target: str) -> str:
+        """将发送目标规范为 framework 要求的 session 格式 platform:message_type:session_id。
+        若 target 已包含至少两个冒号则原样返回；否则视为仅填了 session_id（如 QQ 号），
+        补全为 aiocqhttp:FriendMessage:{target}。空字符串返回空字符串。
+        """
+        if not (target and target.strip()):
+            return ""
+        if target.count(":") >= 2:
+            return target.strip()
+        return f"aiocqhttp:FriendMessage:{target.strip()}"
+
+    def _safe_umo(self, umo: str | None) -> str:
+        """返回可安全传给框架的 unified_msg_origin：非空且不足两段时改为空，避免 from_str 报错。"""
+        if not (umo and str(umo).strip()):
+            return ""
+        s = str(umo).strip()
+        return s if s.count(":") >= 2 else ""
+
+    def _extract_completion_text(self, response) -> str:
+        """从 provider.text_chat 的返回值中提取回复文本。兼容 LLMResponse 或误返回的 SSE 原始字符串。"""
+        if response is None:
+            return ""
+        if hasattr(response, "completion_text") and response.completion_text:
+            return (response.completion_text or "").strip()
+        if hasattr(response, "result_chain") and response.result_chain:
+            chain = response.result_chain
+            if hasattr(chain, "message") and chain.message:
+                return (chain.message or "").strip()
+            if hasattr(chain, "chain") and chain.chain:
+                parts = []
+                for c in chain.chain:
+                    if hasattr(c, "text"):
+                        parts.append(getattr(c, "text", "") or "")
+                if parts:
+                    return "".join(parts).strip()
+        # 若框架误返回了 SSE 流式原始字符串，尝试解析 data: {...} 中的 content
+        if isinstance(response, str) and response.strip():
+            return self._parse_sse_completion_text(response)
+        return ""
+
+    def _parse_sse_completion_text(self, raw: str) -> str:
+        """从 SSE 格式字符串中拼接出完整回复文本。"""
+        parts = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("data:") or line == "data:" or line == "data: [DONE]":
+                continue
+            try:
+                json_str = line[5:].strip()
+                if not json_str:
+                    continue
+                data = json.loads(json_str)
+                choices = data.get("choices") or []
+                if choices and isinstance(choices[0], dict):
+                    delta = (choices[0].get("delta") or {})
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        parts.append(content)
+            except (json.JSONDecodeError, TypeError, KeyError):
+                continue
+        return "".join(parts).strip() if parts else ""
+
+    def _strip_think_blocks(self, text: str) -> str:
+        """去掉 <think>...</think> 及类似内部推理/代码块，只保留对外回复。"""
+        if not text or not text.strip():
+            return ""
+        # 移除 <think>...</think> 整块（含换行）
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        # 移除 code_execution {...} 等单行
+        text = re.sub(r"code_execution\s*\{[^}]*\}", "", text, flags=re.IGNORECASE)
+        return text.strip()
+
     async def _call_external_vision_api(self, image_bytes: bytes) -> str:
         """调用外接视觉API进行图像分析"""
         import aiohttp
@@ -487,6 +560,14 @@ class ScreenCompanion(Star):
                     api_url, json=payload, headers=headers
                 ) as response:
                     if response.status == 200:
+                        content_type = (response.headers.get("Content-Type") or "").lower()
+                        # 部分 API 即使请求 stream=False 仍返回 text/event-stream，按 SSE 解析
+                        if "text/event-stream" in content_type:
+                            raw = await response.text()
+                            text = self._parse_sse_completion_text(raw)
+                            if text:
+                                text = self._strip_think_blocks(text)
+                            return text or "无法识别屏幕内容，API返回流式格式但解析无有效内容"
                         result = await response.json()
                         # 提取识别结果（根据API返回格式调整）
                         if "choices" in result and len(result["choices"]) > 0:
@@ -518,7 +599,8 @@ class ScreenCompanion(Star):
         """
         umo = ""
         try:
-            umo = getattr(session, "unified_msg_origin", None) or ""
+            raw = getattr(session, "unified_msg_origin", None) or ""
+            umo = self._safe_umo(raw)
         except Exception:
             pass
         get_config = getattr(self.context, "get_config", None)
@@ -556,9 +638,25 @@ class ScreenCompanion(Star):
                 prompt=prompt,
                 image_urls=[image_url],
             )
-            text = (resp and getattr(resp, "completion_text", None)) or ""
+            text = self._extract_completion_text(resp)
+            if text:
+                text = self._strip_think_blocks(text)
             return text.strip() if text else ""
         except Exception as e:
+            err_str = str(e)
+            # API 若误返回 SSE 流，框架会抛出「completion 类型错误」；从异常信息中解析出正文再返回
+            if "completion 类型错误" in err_str and ("data:" in err_str or "data: " in err_str):
+                parsed = self._parse_sse_completion_text(err_str)
+                if parsed:
+                    parsed = self._strip_think_blocks(parsed)
+                    if parsed:
+                        logger.info("已从框架视觉 API 流式返回中解析出屏幕描述并继续")
+                        return parsed
+                # 识别为流式返回但解析无有效内容，只打短日志，避免刷屏
+                logger.warning(
+                    "框架视觉模型返回了流式格式且解析后无有效描述，将回退到外接 API。"
+                )
+                return ""
             logger.warning("框架视觉模型调用失败: %s", e)
             return ""
 
@@ -868,8 +966,8 @@ class ScreenCompanion(Star):
             logger.debug("未检测到已启用的 LLM 提供商")
             return [Plain("未检测到已启用的 LLM 提供商，无法进行视觉分析。")]
 
-        # 优先使用配置中的系统提示词，否则通过人格设定管理器获取默认人格
-        umo = getattr(session, "unified_msg_origin", None)
+        # 优先使用配置中的系统提示词，否则通过人格设定管理器获取默认人格（umo 须为合法 session 格式，否则框架解析会报错）
+        umo = self._safe_umo(getattr(session, "unified_msg_origin", None) or "")
         system_prompt = self.config.get("system_prompt") or self._get_default_system_prompt(umo)
         logger.info(f"[任务 {task_id}] 使用诺星缘人格设定")
 
@@ -958,15 +1056,15 @@ class ScreenCompanion(Star):
                 ]
 
             # 第二阶段：基于识别结果通过AstrBot的LLM进行人格化回复
-            # 尝试获取对话历史，提供更连贯的交互
+            # 尝试获取对话历史，提供更连贯的交互（uid 须为合法 session 格式）
             contexts = []
             try:
                 conv_mgr = getattr(self.context, "conversation_manager", None)
                 if conv_mgr is not None:
-                    # 安全获取uid，处理session可能无效的情况
                     uid = ""
                     try:
-                        uid = session.unified_msg_origin if session else ""
+                        raw_uid = getattr(session, "unified_msg_origin", None) or "" if session else ""
+                        uid = self._safe_umo(raw_uid)
                     except Exception as e:
                         logger.debug(f"获取session uid失败: {e}")
                     if uid:
@@ -1016,28 +1114,37 @@ class ScreenCompanion(Star):
                 prompt=interaction_prompt, system_prompt=system_prompt
             )
 
-            # 提取互动回复
-            response_text = "我看不太清你的屏幕内容呢。"
-            if (
-                interaction_response
-                and hasattr(interaction_response, "completion_text")
-                and interaction_response.completion_text
-            ):
-                response_text = interaction_response.completion_text
-                if debug_mode:
-                    logger.info(f"互动回复: {response_text}")
-            else:
+            # 提取互动回复（兼容返回 LLMResponse 或误返回的 SSE 原始字符串）
+            response_text = self._extract_completion_text(interaction_response)
+            if not response_text:
+                response_text = "我看不太清你的屏幕内容呢。"
                 if debug_mode:
                     logger.warning("LLM 未返回有效互动回复")
+            elif debug_mode:
+                logger.info(f"互动回复: {response_text}")
 
         except Exception as e:
-            logger.error(f"核心功能失败: {e}")
-            # 如果核心功能失败，返回一个默认的回复
-            return [
-                Plain(
-                    "我已经看到了你的屏幕，但是无法进行分析。请确保你配置的视觉API正确。"
-                )
-            ]
+            err_str = str(e)
+            # 若框架因 API 返回 SSE 字符串而非 ChatCompletion 抛出「completion 类型错误」，尝试从异常信息中解析出回复正文并继续
+            if "completion 类型错误" in err_str and ("data:" in err_str or "data: " in err_str):
+                parsed = self._parse_sse_completion_text(err_str)
+                if parsed:
+                    response_text = parsed
+                    logger.info("已从 API 流式返回中解析出回复并继续")
+                else:
+                    logger.error(f"核心功能失败: {e}")
+                    return [
+                        Plain(
+                            "我已经看到了你的屏幕，但是无法进行分析。请确保你配置的视觉API正确。"
+                        )
+                    ]
+            else:
+                logger.error(f"核心功能失败: {e}")
+                return [
+                    Plain(
+                        "我已经看到了你的屏幕，但是无法进行分析。请确保你配置的视觉API正确。"
+                    )
+                ]
 
         # 保存截图到临时文件
         # 创建临时文件，使用uuid生成唯一文件名
@@ -1991,20 +2098,26 @@ class ScreenCompanion(Star):
                     try:
                         # 创建一个虚拟的event对象，用于传递给_analyze_screen
                         class VirtualEvent:
-                            def __init__(self):
+                            def __init__(self, star_ref):
+                                self._star = star_ref
                                 self.unified_msg_origin = self._get_default_target()
 
                             def _get_default_target(self):
                                 config = getattr(self, "config", {})
                                 admin_qq = config.get("admin_qq", "")
                                 if admin_qq:
-                                    return f"aiocqhttp:FriendMessage:{admin_qq}"
+                                    return self._star._normalize_send_target(
+                                        f"aiocqhttp:FriendMessage:{admin_qq}"
+                                    )
+                                pt = config.get("proactive_target", "")
+                                if pt:
+                                    return self._star._normalize_send_target(pt)
                                 return ""
 
                         # 绑定config到VirtualEvent
                         setattr(VirtualEvent, "config", self.config)
 
-                        event = VirtualEvent()
+                        event = VirtualEvent(self)
 
                         image_bytes, active_window_title = await asyncio.wait_for(
                             self._capture_screen_bytes(), timeout=15.0 if self.capture_source == "remote" else 10.0
@@ -2024,12 +2137,13 @@ class ScreenCompanion(Star):
                             timeout=120.0,
                         )
 
-                        # 确定消息发送目标
+                        # 确定消息发送目标（须为 platform:message_type:session_id 格式）
                         target = self.config.get("proactive_target", "")
                         if not target:
                             admin_qq = self.config.get("admin_qq", "")
                             if admin_qq:
                                 target = f"aiocqhttp:FriendMessage:{admin_qq}"
+                        target = self._normalize_send_target(target)
 
                         if target:
                             # 提取文本内容并发送
@@ -2095,12 +2209,13 @@ class ScreenCompanion(Star):
                                 timeout=120.0,
                             )
 
-                            # 确定消息发送目标
+                            # 确定消息发送目标（须为 platform:message_type:session_id 格式）
                             target = self.config.get("proactive_target", "")
                             if not target:
                                 admin_qq = self.config.get("admin_qq", "")
                                 if admin_qq:
                                     target = f"aiocqhttp:FriendMessage:{admin_qq}"
+                            target = self._normalize_send_target(target)
 
                             if target:
                                 # 提取文本内容并发送
@@ -2401,28 +2516,22 @@ class ScreenCompanion(Star):
                         for comp in components:
                             chain.chain.append(comp)
 
-                        # 确定消息发送目标
+                        # 确定消息发送目标（须为 platform:message_type:session_id 格式）
                         target = self.config.get("proactive_target", "")
                         if not target:
                             admin_qq = self.config.get("admin_qq", "")
                             if admin_qq:
-                                # 使用管理员QQ号构建目标
                                 target = f"aiocqhttp:FriendMessage:{admin_qq}"
                                 logger.info(f"使用管理员QQ号构建消息目标: {target}")
                             else:
-                                # 回退到原始事件的目标
                                 try:
-                                    target = event.unified_msg_origin
-                                    logger.info(f"使用原始事件目标: {target}")
+                                    target = getattr(event, "unified_msg_origin", "") or ""
+                                    if target:
+                                        logger.info(f"使用原始事件目标: {target}")
                                 except Exception as e:
                                     logger.error(f"获取原始事件目标失败: {e}")
-                                    # 使用默认目标
-                                    target = (
-                                        f"aiocqhttp:FriendMessage:{admin_qq}"
-                                        if admin_qq
-                                        else ""
-                                    )
-                                    logger.info(f"使用默认目标: {target}")
+                                    target = ""
+                        target = self._normalize_send_target(target)
 
                         # 提取文本内容并分段发送
                         text_content = ""
@@ -2433,58 +2542,59 @@ class ScreenCompanion(Star):
                         # 添加日记条目
                         self._add_diary_entry(text_content, active_window_title)
 
-                        # 自动分段发送，参考 splitter 插件实现
-                        if text_content:
-                            segments = self._split_message(text_content)
-                            logger.info(
-                                f"准备发送消息，目标: {target}, 文本内容: {text_content}"
-                            )
-                            if len(segments) > 1:
-                                # 发送前 N-1 段
-                                for i in range(len(segments) - 1):
-                                    if (
-                                        not self.is_running
-                                        or getattr(asyncio.current_task(), "cancelled", lambda: False)()
-                                    ):
-                                        break
-                                    segment = segments[i]
-                                    if segment.strip():
-                                        # 不需要添加前缀，让回复更自然
-                                        await getattr(self.context, "send_message")(
-                                            event.unified_msg_origin,
-                                            MessageChain([Plain(segment)]),
-                                        )
-                                        # 添加小延迟，使回复更自然
-                                        await asyncio.sleep(0.5)
-                                # 最后一段
-                                if (
-                                    self.is_running
-                                    and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
-                                    and segments[-1].strip()
-                                ):
-                                    await getattr(self.context, "send_message")(
-                                        event.unified_msg_origin,
-                                        MessageChain([Plain(segments[-1])]),
-                                    )
-                            else:
-                                # 只有一段，直接发送
-                                if (
-                                    self.is_running
-                                    and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
-                                ):
-                                    await getattr(self.context, "send_message")(
-                                        event.unified_msg_origin,
-                                        MessageChain([Plain(text_content)]),
-                                    )
-                        else:
-                            # 发送带图片的消息
-                            if (
-                                self.is_running
-                                and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
-                            ):
-                                await getattr(self.context, "send_message")(
-                                    event.unified_msg_origin, chain
+                        # 自动分段发送，参考 splitter 插件实现（仅当目标合法时发送）
+                        if target:
+                            if text_content:
+                                segments = self._split_message(text_content)
+                                logger.info(
+                                    f"准备发送消息，目标: {target}, 文本内容: {text_content}"
                                 )
+                                if len(segments) > 1:
+                                    # 发送前 N-1 段
+                                    for i in range(len(segments) - 1):
+                                        if (
+                                            not self.is_running
+                                            or getattr(asyncio.current_task(), "cancelled", lambda: False)()
+                                        ):
+                                            break
+                                        segment = segments[i]
+                                        if segment.strip():
+                                            await getattr(self.context, "send_message")(
+                                                target,
+                                                MessageChain([Plain(segment)]),
+                                            )
+                                            await asyncio.sleep(0.5)
+                                    # 最后一段
+                                    if (
+                                        self.is_running
+                                        and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
+                                        and segments[-1].strip()
+                                    ):
+                                        await getattr(self.context, "send_message")(
+                                            target,
+                                            MessageChain([Plain(segments[-1])]),
+                                        )
+                                else:
+                                    # 只有一段，直接发送
+                                    if (
+                                        self.is_running
+                                        and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
+                                    ):
+                                        await getattr(self.context, "send_message")(
+                                            target,
+                                            MessageChain([Plain(text_content)]),
+                                        )
+                            else:
+                                # 发送带图片的消息
+                                if (
+                                    self.is_running
+                                    and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
+                                ):
+                                    await getattr(self.context, "send_message")(
+                                        target, chain
+                                    )
+                        elif text_content:
+                            logger.warning("主动消息未发送：未配置有效的推送目标（proactive_target 或 admin_qq），且无事件来源")
 
                         # 尝试将消息添加到对话历史
                         try:
