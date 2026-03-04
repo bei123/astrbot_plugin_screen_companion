@@ -8,7 +8,10 @@
 **GitHub 仓库：** [https://github.com/menglimi/astrbot_plugin_screen_companion](https://github.com/menglimi/astrbot_plugin_screen_companion)
 
 ---
-
+## 已知问题
+- 日记字体不支持中文，且撤回日记后的回复异常
+- 音量检测问题
+  
 ## 支持的环境
 - Windows 桌面环境：需要授予屏幕录制权限
 - macOS 桌面环境：需要授予屏幕录制权限
