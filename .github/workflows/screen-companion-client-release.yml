@@ -6,7 +6,7 @@ on:
   push:
     branches: [ master, main ]
     paths:
-      - "data/plugins/astrbot_plugin_screen_companion/screen_relay_client_win.py"
+      - "screen_relay_client_win.py"
       - ".github/workflows/screen-companion-client-release.yml"
   workflow_dispatch:
 
@@ -34,7 +34,7 @@ jobs:
       - name: Build exe with PyInstaller
         shell: pwsh
         run: |
-          $script = "data/plugins/astrbot_plugin_screen_companion/screen_relay_client_win.py"
+          $script = "screen_relay_client_win.py"
           pyinstaller --onefile --windowed --name "ScreenCompanion-Windows" --noconfirm $script
           if (-not (Test-Path "dist/ScreenCompanion-Windows.exe")) { exit 1 }
 
