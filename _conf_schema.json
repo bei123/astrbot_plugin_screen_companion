@@ -141,11 +141,16 @@
       "enabled": true
     }
   },
-  "use_external_vision": {
-    "description": "使用外接视觉API",
-    "type": "bool",
-    "hint": "开启后，使用外接API进行视觉模型调用，而不是Astrbot自带的视觉模型。",
-    "default": true,
+  "vision_source": {
+    "description": "屏幕识别视觉来源",
+    "type": "string",
+    "hint": "仅外接：只用下方配置的外接视觉 API。仅框架：只用 AstrBot 的「默认图片转述模型」或当前对话模型（需支持多模态），请在提供方设置中配置。外接+框架回退：优先用框架视觉，失败时再用外接 API。",
+    "default": "external",
+    "options": [
+      "external",
+      "framework",
+      "external_then_framework"
+    ],
     "condition": {
       "enabled": true
     }
@@ -153,11 +158,10 @@
   "vision_api_url": {
     "description": "视觉API地址",
     "type": "string",
-    "hint": "外接视觉API的URL地址，例如：https://api.qhaigc.net/v1/chat/completions。",
+    "hint": "外接视觉 API 的 URL。视觉来源为「仅外接」时必填；为「外接+框架回退」时在框架失败后使用，建议一并填写。",
     "default": "",
     "condition": {
-      "enabled": true,
-      "use_external_vision": true
+      "enabled": true
     }
   },
   "vision_api_key": {
@@ -166,8 +170,7 @@
     "hint": "外接视觉API的密钥。",
     "default": "",
     "condition": {
-      "enabled": true,
-      "use_external_vision": true
+      "enabled": true
     }
   },
   "vision_api_model": {
@@ -176,8 +179,7 @@
     "hint": "外接视觉API使用的模型名称。",
     "default": "",
     "condition": {
-      "enabled": true,
-      "use_external_vision": true
+      "enabled": true
     }
   },
   "weather_api_key": {
