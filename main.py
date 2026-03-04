@@ -335,8 +335,9 @@ class ScreenCompanion(Star):
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
 
-            # 发送请求
-            async with aiohttp.ClientSession() as session:
+            # 发送请求 - 添加超时设置
+            timeout = aiohttp.ClientTimeout(total=60.0)  # 60秒超时
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     api_url, json=payload, headers=headers
                 ) as response:
@@ -359,6 +360,9 @@ class ScreenCompanion(Star):
                             f"视觉API调用失败: {response.status} - {error_text}"
                         )
                         return f"无法识别屏幕内容，API调用失败: {response.status}"
+        except asyncio.TimeoutError:
+            logger.error("视觉API调用超时，请检查网络连接")
+            return "无法识别屏幕内容，API调用超时"
         except Exception as e:
             logger.error(f"调用视觉API异常: {e}")
             return f"无法识别屏幕内容，API调用异常: {str(e)}"
@@ -827,9 +831,17 @@ class ScreenCompanion(Star):
                 history_str = "\n最近的对话:\n" + "\n".join(contexts)
                 interaction_prompt += history_str
 
-            interaction_response = await provider.text_chat(
-                prompt=interaction_prompt, system_prompt=system_prompt
-            )
+            # 添加超时设置，避免LLM调用卡住
+            try:
+                interaction_response = await asyncio.wait_for(
+                    provider.text_chat(
+                        prompt=interaction_prompt, system_prompt=system_prompt
+                    ),
+                    timeout=60.0  # 60秒超时
+                )
+            except asyncio.TimeoutError:
+                logger.error("LLM调用超时，请检查网络连接和API响应速度")
+                return [Plain("分析超时，请稍后再试")]
 
             # 提取互动回复
             response_text = "我看不太清你的屏幕内容呢。"
@@ -2103,7 +2115,7 @@ class ScreenCompanion(Star):
                             def _get_default_target(self):
                                 admin_qq = self.config.get("admin_qq", "")
                                 if admin_qq:
-                                    return f"aiocqhttp:private_message:{admin_qq}"
+                                    return f"aiocqhttp:FriendMessage:{admin_qq}"
                                 return ""
 
                         # 绑定config到VirtualEvent
@@ -2130,7 +2142,7 @@ class ScreenCompanion(Star):
                         if not target:
                             admin_qq = self.config.get("admin_qq", "")
                             if admin_qq:
-                                target = f"aiocqhttp:private_message:{admin_qq}"
+                                target = f"aiocqhttp:FriendMessage:{admin_qq}"
 
                         if target:
                             # 提取文本内容并发送
@@ -2198,7 +2210,7 @@ class ScreenCompanion(Star):
                             if not target:
                                 admin_qq = self.config.get("admin_qq", "")
                                 if admin_qq:
-                                    target = f"aiocqhttp:private_message:{admin_qq}"
+                                    target = f"aiocqhttp:FriendMessage:{admin_qq}"
 
                             if target:
                                 # 提取文本内容并发送
@@ -2502,7 +2514,7 @@ class ScreenCompanion(Star):
                             admin_qq = self.config.get("admin_qq", "")
                             if admin_qq:
                                 # 使用管理员QQ号构建目标
-                                target = f"aiocqhttp:private_message:{admin_qq}"
+                                target = f"aiocqhttp:FriendMessage:{admin_qq}"
                                 logger.info(f"使用管理员QQ号构建消息目标: {target}")
                             else:
                                 # 回退到原始事件的目标
@@ -2513,7 +2525,7 @@ class ScreenCompanion(Star):
                                     logger.error(f"获取原始事件目标失败: {e}")
                                     # 使用默认目标
                                     target = (
-                                        f"aiocqhttp:private_message:{admin_qq}"
+                                        f"aiocqhttp:FriendMessage:{admin_qq}"
                                         if admin_qq
                                         else ""
                                     )
