@@ -25,6 +25,7 @@ class ScreenCompanion(Star):
 
         super().__init__(context)
         self.config = config
+        self.bot_name = config.get("bot_name", "诺星缘")
         self.auto_tasks = {}
         self.is_running = False
         self.task_counter = 0
@@ -1355,7 +1356,7 @@ class ScreenCompanion(Star):
                 yield event.plain_result("喂！你怎么偷看人家的日记啦？真是的...")
 
             # 发送日记内容
-            diary_message = f"【诺星缘的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{diary_content[:1000]}"
+            diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{diary_content[:1000]}"
 
             # 检查是否需要自动撤回
             if self.diary_auto_recall:
@@ -1375,7 +1376,37 @@ class ScreenCompanion(Star):
                 task = asyncio.create_task(recall_message())
                 self.background_tasks.append(task)
 
-            yield event.plain_result(diary_message)
+            # 检查是否以图片形式发送日记
+            send_as_image = self.config.get("diary_send_as_image", False)
+            if send_as_image:
+                try:
+                    from PIL import Image as PILImage, ImageDraw, ImageFont
+                    width, height = 800, 600
+                    image = PILImage.new("RGB", (width, height), color=(255, 255, 255))
+                    draw = ImageDraw.Draw(image)
+                    try:
+                        font = ImageFont.truetype("arial.ttf", 16)
+                    except Exception:
+                        font = ImageFont.load_default()
+                    text_lines = diary_message.split("\n")
+                    y = 50
+                    line_height = 25
+                    for line in text_lines:
+                        draw.text((50, y), line, fill=(0, 0, 0), font=font)
+                        y += line_height
+                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    image.save(tmp, format="PNG")
+                    tmp.close()
+                    yield event.image_result(tmp.name)
+                    try:
+                        os.unlink(tmp.name)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.error(f"生成日记图片失败: {e}")
+                    yield event.plain_result(diary_message)
+            else:
+                yield event.plain_result(diary_message)
 
         except Exception as e:
             logger.error(f"读取日记失败: {e}")
@@ -1463,9 +1494,38 @@ class ScreenCompanion(Star):
             self.background_tasks.append(task)
 
         # 按日期从新到旧发送日记
+        send_as_image = self.config.get("diary_send_as_image", False)
         for diary in found_diaries:
-            diary_message = f"【诺星缘的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary['content'][:1000]}"
-            yield event.plain_result(diary_message)
+            diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary['content'][:1000]}"
+            if send_as_image:
+                try:
+                    from PIL import Image as PILImage, ImageDraw, ImageFont
+                    width, height = 800, 600
+                    image = PILImage.new("RGB", (width, height), color=(255, 255, 255))
+                    draw = ImageDraw.Draw(image)
+                    try:
+                        font = ImageFont.truetype("arial.ttf", 16)
+                    except Exception:
+                        font = ImageFont.load_default()
+                    text_lines = diary_message.split("\n")
+                    y = 50
+                    line_height = 25
+                    for line in text_lines:
+                        draw.text((50, y), line, fill=(0, 0, 0), font=font)
+                        y += line_height
+                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    image.save(tmp, format="PNG")
+                    tmp.close()
+                    yield event.image_result(tmp.name)
+                    try:
+                        os.unlink(tmp.name)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.error(f"生成日记图片失败: {e}")
+                    yield event.plain_result(diary_message)
+            else:
+                yield event.plain_result(diary_message)
             await asyncio.sleep(0.5)  # 添加小延迟使发送更自然
 
     def _is_in_active_time_range(self):

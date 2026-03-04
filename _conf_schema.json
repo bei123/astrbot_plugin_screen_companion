@@ -1,4 +1,10 @@
 {
+  "bot_name": {
+    "description": "角色名称",
+    "type": "string",
+    "hint": "机器人的角色名称，用于日记和互动中",
+    "default": "诺星缘"
+  },
   "enabled": {
     "description": "是否开启自动截图互动",
     "type": "bool",
@@ -253,6 +259,16 @@
       "diary_auto_recall": true
     }
   },
+  "diary_send_as_image": {
+    "description": "以图片形式发送日记",
+    "type": "bool",
+    "hint": "开启后，发送日记时会将内容转换为图片形式发送，而不是文本形式。",
+    "default": false,
+    "condition": {
+      "enabled": true,
+      "enable_diary": true
+    }
+  },
   "diary_generation_prompt": {
     "description": "日记生成提示词",
     "type": "text",
@@ -314,7 +330,7 @@
   "proactive_target": {
     "description": "主动消息推送目标",
     "type": "string",
-    "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。如果不填写，插件将尝试使用管理员QQ号构建目标。格式参考：aiocqhttp:private_message:123456",
+    "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。如果不填写，插件将尝试使用管理员QQ号构建目标。格式参考：aiocqhttp:FriendMessage:123456",
     "default": "",
     "condition": {
       "enabled": true
@@ -439,5 +455,11 @@
     "hint": "通过数字控制互动强度：1=极简，2=轻度，3=中度，4=重度，5=深度",
     "default": 3,
     "options": [1, 2, 3, 4, 5]
+  },
+  "debug": {
+    "description": "调试模式",
+    "type": "bool",
+    "hint": "开启后显示详细日志，关闭时隐藏大部分日志",
+    "default": false
   }
 }
