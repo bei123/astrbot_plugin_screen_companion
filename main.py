@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import uuid
+from typing import Any
 
 # 无法从人格设定管理器获取时的后备提示词（应通过 persona_manager.get_default_persona_v3 获取默认人格）
 _FALLBACK_SYSTEM_PROMPT = "角色设定：窥屏助手\n把你正在使用的人格复制到这里"
@@ -510,6 +511,57 @@ class ScreenCompanion(Star):
             logger.error(f"调用视觉API异常: {e}")
             return f"无法识别屏幕内容，API调用异常: {str(e)}"
 
+    async def _call_framework_vision(self, image_bytes: bytes, session=None) -> str:
+        """使用框架的视觉模型（图片转述/多模态对话）进行屏幕识别。
+        依赖配置中的默认图片转述模型（provider_settings.default_image_caption_provider_id），
+        未配置时使用当前会话的对话模型。
+        """
+        umo = ""
+        try:
+            umo = getattr(session, "unified_msg_origin", None) or ""
+        except Exception:
+            pass
+        get_config = getattr(self.context, "get_config", None)
+        if get_config is None:
+            provider_settings = {}
+        else:
+            cfg = get_config(umo=umo)
+            provider_settings = (getattr(cfg, "get", lambda k, d=None: d)("provider_settings", {}) or {}) if cfg else {}
+        vision_provider_id = provider_settings.get("default_image_caption_provider_id") or ""
+        prompt = provider_settings.get(
+            "image_caption_prompt",
+            "请用中文简要描述这张屏幕截图的内容：界面元素、用户可能在做的事、关键信息。",
+        )
+        if not vision_provider_id:
+            try:
+                get_curr: Any = getattr(
+                    self.context, "get_current_chat_provider_id", None
+                )
+                if get_curr and callable(get_curr):
+                    vision_provider_id = await get_curr(umo)  # type: ignore[misc]
+                else:
+                    logger.warning("框架未提供 get_current_chat_provider_id")
+                    return ""
+            except Exception as e:
+                logger.warning("未配置图片转述模型且获取当前对话模型失败: %s", e)
+                return ""
+        image_url = "base64://" + base64.b64encode(image_bytes).decode("utf-8")
+        llm_generate: Any = getattr(self.context, "llm_generate", None)
+        if not llm_generate or not callable(llm_generate):
+            logger.warning("框架未提供 llm_generate 方法")
+            return ""
+        try:
+            resp = await llm_generate(  # type: ignore[misc]
+                chat_provider_id=vision_provider_id,
+                prompt=prompt,
+                image_urls=[image_url],
+            )
+            text = (resp and getattr(resp, "completion_text", None)) or ""
+            return text.strip() if text else ""
+        except Exception as e:
+            logger.warning("框架视觉模型调用失败: %s", e)
+            return ""
+
     def _identify_scene(self, window_title: str) -> str:
         """增强的场景识别"""
         if not window_title:
@@ -873,15 +925,37 @@ class ScreenCompanion(Star):
             base64_data = base64.b64encode(image_bytes).decode("utf-8")
 
             if debug_mode:
-                logger.info("开始调用外接视觉API进行屏幕分析")
+                logger.info("开始进行屏幕视觉分析")
                 logger.debug(f"System prompt: {system_prompt}")
                 logger.debug(f"Image size: {len(image_bytes)} bytes")
                 logger.debug(f"Base64 data length: {len(base64_data)} characters")
 
-            # 第一阶段：使用外接视觉API识别屏幕内容
-            logger.info("使用外接视觉API进行屏幕识别")
-            recognition_text = await self._call_external_vision_api(image_bytes)
-            logger.info(f"外接API识别结果: {recognition_text}")
+            # 第一阶段：屏幕识别（外接 API / 框架视觉 / 外接+框架回退）
+            vision_source = self.config.get("vision_source", "external")
+            recognition_text = ""
+            if vision_source == "framework":
+                logger.info("使用框架视觉模型进行屏幕识别")
+                recognition_text = await self._call_framework_vision(image_bytes, session)
+                logger.info(f"框架视觉识别结果: {recognition_text[:200] if recognition_text else '(空)'}...")
+            elif vision_source == "external_then_framework":
+                recognition_text = await self._call_framework_vision(image_bytes, session)
+                if not (recognition_text and recognition_text.strip()):
+                    logger.info("框架视觉未返回有效结果，回退到外接视觉API")
+                    recognition_text = await self._call_external_vision_api(image_bytes)
+                else:
+                    logger.info("使用框架视觉模型识别结果")
+            else:
+                # "external" 或未配置
+                logger.info("使用外接视觉API进行屏幕识别")
+                recognition_text = await self._call_external_vision_api(image_bytes)
+                logger.info(f"外接API识别结果: {recognition_text[:200] if recognition_text else '(空)'}...")
+
+            if not (recognition_text and recognition_text.strip()):
+                return [
+                    Plain(
+                        "无法识别屏幕内容，请检查视觉来源配置（外接 API 或框架图片转述模型）是否可用。"
+                    )
+                ]
 
             # 第二阶段：基于识别结果通过AstrBot的LLM进行人格化回复
             # 尝试获取对话历史，提供更连贯的交互
