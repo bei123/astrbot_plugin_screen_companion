@@ -1,4 +1,10 @@
 {
+  "bot_name": {
+    "description": "角色名称",
+    "type": "string",
+    "hint": "机器人的角色名称，用于日记和互动中",
+    "default": "诺星缘"
+  },
   "enabled": {
     "description": "是否开启自动截图互动",
     "type": "bool",

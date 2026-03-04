@@ -26,6 +26,7 @@ class ScreenCompanion(Star):
 
         super().__init__(context)
         self.config = config
+        self.bot_name = config.get("bot_name", "诺星缘")
         self.auto_tasks = {}
         self.is_running = False
         self.task_counter = 0
@@ -692,12 +693,12 @@ class ScreenCompanion(Star):
             logger.debug("未检测到已启用的 LLM 提供商")
             return [Plain("未检测到已启用的 LLM 提供商，无法进行视觉分析。")]
 
-        # 直接使用配置文件中的诺星缘人格设定
+        # 直接使用配置文件中的人格设定
         system_prompt = self.config.get("system_prompt", "")
         if not system_prompt:
-            # 如果配置中没有设置，使用默认的诺星缘人格
+            # 如果配置中没有设置，使用默认的人格
             system_prompt = DEFAULT_SYSTEM_PROMPT
-        logger.info(f"[任务 {task_id}] 使用诺星缘人格设定")
+        logger.info(f"[任务 {task_id}] 使用 {self.bot_name} 人格设定")
 
         debug_mode = self.config.get("debug", False)
 
@@ -822,9 +823,9 @@ class ScreenCompanion(Star):
                     interaction_prompt += f" {system_status_prompt}"
             # 根据场景调整提示词，增加深度思考和未来猜想
             if scene == "视频" or scene == "阅读":
-                interaction_prompt += " 请以诺星缘的身份，对屏幕内容进行深度分析和思考。不仅要描述当前内容，还要对剧情发展、人物关系或主题意义进行猜想和分析。可以提出创意性的见解，预测未来可能的发展方向，或者探讨内容背后的深层含义。保持口语化的表达方式，符合女高中生的说话风格，富有想象力和洞察力。绝对不要使用括号描述动作或表情，直接通过语言表达你的意思。最多输出四句话，最好在三句话内完成回复。"
+                interaction_prompt += f" 请以{self.bot_name}的身份，对屏幕内容进行深度分析和思考。不仅要描述当前内容，还要对剧情发展、人物关系或主题意义进行猜想和分析。可以提出创意性的见解，预测未来可能的发展方向，或者探讨内容背后的深层含义。保持口语化的表达方式，符合女高中生的说话风格，富有想象力和洞察力。绝对不要使用括号描述动作或表情，直接通过语言表达你的意思。最多输出四句话，最好在三句话内完成回复。"
             else:
-                interaction_prompt += " 请以诺星缘的身份，直接给出你的评论或互动，不要添加任何引言或开场白。要具体提及屏幕上的内容，针对用户正在进行的操作提供相关的互动。保持口语化的表达方式，简短自然，符合女高中生的说话风格。绝对不要使用括号描述动作或表情，直接通过语言表达你的意思。最多输出三句话，最好在两句话内完成回复。"
+                interaction_prompt += f" 请以{self.bot_name}的身份，直接给出你的评论或互动，不要添加任何引言或开场白。要具体提及屏幕上的内容，针对用户正在进行的操作提供相关的互动。保持口语化的表达方式，简短自然，符合女高中生的说话风格。绝对不要使用括号描述动作或表情，直接通过语言表达你的意思。最多输出三句话，最好在两句话内完成回复。"
 
             # 如果有对话历史，添加到提示词中
             if contexts:
@@ -1204,12 +1205,14 @@ class ScreenCompanion(Star):
     @kpi_group.command("diary")
     async def kpi_diary(self, event: AstrMessageEvent, date: str = None):
         """查看特定日期的日记 /kpi diary [YYYY-MM-DD]"""
-        await self._handle_diary_command(event, date)
+        async for result in self._handle_diary_command(event, date):
+            yield result
 
     @kpi_group.command("d")
     async def kpi_d(self, event: AstrMessageEvent, date: str = None):
         """查看特定日期的日记（简化版） /kpi d [YYYYMMDD]"""
-        await self._handle_diary_command(event, date)
+        async for result in self._handle_diary_command(event, date):
+            yield result
 
     async def _handle_diary_command(self, event: AstrMessageEvent, date: str = None):
         """处理日记查看命令"""
@@ -1224,10 +1227,11 @@ class ScreenCompanion(Star):
         if date:
             try:
                 # 支持两种日期格式：YYYY-MM-DD 和 YYYYMMDD
-                if len(date) == 8 and date.isdigit():
-                    target_date = datetime.datetime.strptime(date, "%Y%m%d").date()
+                date_str = str(date)
+                if len(date_str) == 8 and date_str.isdigit():
+                    target_date = datetime.datetime.strptime(date_str, "%Y%m%d").date()
                 else:
-                    target_date = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+                    target_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
             except ValueError:
                 yield event.plain_result(
                     "日期格式错误，请使用 YYYY-MM-DD 或 YYYYMMDD 格式，例如：/kpi d 20260302"
@@ -1260,10 +1264,12 @@ class ScreenCompanion(Star):
                 # 限制在500字以下
                 if len(summary_text) > 500:
                     summary_text = summary_text[:497] + "..."
-                diary_message = f"【诺星缘的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
             else:
                 # 尝试提取旧格式的总结部分
                 summary_start = diary_content.find("## 诺星缘的总结")
+                if summary_start == -1:
+                    summary_start = diary_content.find(f"## {self.bot_name}的总结")
                 if summary_start != -1:
                     summary_content = diary_content[summary_start:]
                     # 提取总结文本，去除标题
@@ -1272,13 +1278,13 @@ class ScreenCompanion(Star):
                     # 限制在500字以下
                     if len(summary_text) > 500:
                         summary_text = summary_text[:497] + "..."
-                    diary_message = f"【诺星缘的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                    diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
                 else:
                     # 如果没有感想或总结部分，使用整个日记内容（限制500字）
-                    diary_text = diary_content.replace('# 诺星缘的日记', '').replace('# 诺星缘的观察日记', '').replace(f'{target_date.strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
+                    diary_text = diary_content.replace('# 诺星缘的日记', '').replace(f'# {self.bot_name}的日记', '').replace('# 诺星缘的观察日记', '').replace(f'# {self.bot_name}的观察日记', '').replace(f'{target_date.strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
                     if len(diary_text) > 500:
                         diary_text = diary_text[:497] + "..."
-                    diary_message = f"【诺星缘的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{diary_text}"
+                    diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{diary_text}"
 
             # 检查是否需要自动撤回
             if self.diary_auto_recall:
@@ -1456,10 +1462,12 @@ class ScreenCompanion(Star):
                 # 限制在500字以下
                 if len(summary_text) > 500:
                     summary_text = summary_text[:497] + "..."
-                diary_message = f"【诺星缘的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
             else:
                 # 尝试提取旧格式的总结部分
                 summary_start = diary['content'].find("## 诺星缘的总结")
+                if summary_start == -1:
+                    summary_start = diary['content'].find(f"## {self.bot_name}的总结")
                 if summary_start != -1:
                     summary_content = diary['content'][summary_start:]
                     # 提取总结文本，去除标题
@@ -1468,13 +1476,13 @@ class ScreenCompanion(Star):
                     # 限制在500字以下
                     if len(summary_text) > 500:
                         summary_text = summary_text[:497] + "..."
-                    diary_message = f"【诺星缘的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                    diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
                 else:
                     # 如果没有感想或总结部分，使用整个日记内容（限制500字）
-                    diary_text = diary['content'].replace('# 诺星缘的日记', '').replace('# 诺星缘的观察日记', '').replace(f'{diary["date"].strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
+                    diary_text = diary['content'].replace('# 诺星缘的日记', '').replace(f'# {self.bot_name}的日记', '').replace('# 诺星缘的观察日记', '').replace(f'# {self.bot_name}的观察日记', '').replace(f'{diary["date"].strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
                     if len(diary_text) > 500:
                         diary_text = diary_text[:497] + "..."
-                    diary_message = f"【诺星缘的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary_text}"
+                    diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary_text}"
             
             # 检查是否以图片形式发送
             send_as_image = self.config.get("diary_send_as_image", False)
@@ -1588,12 +1596,14 @@ class ScreenCompanion(Star):
     @kpi_group.command("complete")
     async def kpi_complete(self, event: AstrMessageEvent, date: str = None):
         """补写日记 /kpi complete [YYYY-MM-DD]"""
-        await self._handle_complete_command(event, date)
+        async for result in self._handle_complete_command(event, date):
+            yield result
 
     @kpi_group.command("cd")
     async def kpi_cd(self, event: AstrMessageEvent, date: str = None):
         """补写日记（简化版） /kpi cd [YYYYMMDD]"""
-        await self._handle_complete_command(event, date)
+        async for result in self._handle_complete_command(event, date):
+            yield result
 
     async def _handle_complete_command(self, event: AstrMessageEvent, date: str = None):
         """处理日记补写命令"""
@@ -1608,10 +1618,11 @@ class ScreenCompanion(Star):
         if date:
             try:
                 # 支持两种日期格式：YYYY-MM-DD 和 YYYYMMDD
-                if len(date) == 8 and date.isdigit():
-                    target_date = datetime.datetime.strptime(date, "%Y%m%d").date()
+                date_str = str(date)
+                if len(date_str) == 8 and date_str.isdigit():
+                    target_date = datetime.datetime.strptime(date_str, "%Y%m%d").date()
                 else:
-                    target_date = datetime.datetime.strptime(date, "%Y-%m-%d").date()
+                    target_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
             except ValueError:
                 yield event.plain_result(
                     "日期格式错误，请使用 YYYY-MM-DD 或 YYYYMMDD 格式，例如：/kpi cd 20260302"
@@ -1639,7 +1650,7 @@ class ScreenCompanion(Star):
         try:
             # 构建补写日记的提示词
             system_prompt = self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
-            completion_prompt = f"请以诺星缘的身份，补写 {target_date.strftime('%Y年%m月%d日')} 的日记。虽然没有具体的观察记录，但请根据之前的日记风格和你的性格，想象并记录这一天可能发生的事情。保持口语化的表达方式，符合女高中生的说话风格，要有情感和个性。"
+            completion_prompt = f"请以{self.bot_name}的身份，补写 {target_date.strftime('%Y年%m月%d日')} 的日记。虽然没有具体的观察记录，但请根据之前的日记风格和你的性格，想象并记录这一天可能发生的事情。保持口语化的表达方式，符合女高中生的说话风格，要有情感和个性。"
 
             # 参考前几天的日记
             reference_days = []
@@ -1690,7 +1701,7 @@ class ScreenCompanion(Star):
                     logger.debug(f"获取天气信息失败: {e}")
 
                 # 构建补写日记内容 - 符合标准日记格式
-                diary_content = f"# 诺星缘的日记\n\n"
+                diary_content = f"# {self.bot_name}的日记\n\n"
                 diary_content += f"## {target_date.strftime('%Y年%m月%d日')} {weekday}\n\n"
                 if weather_info:
                     diary_content += f"**天气**: {weather_info}\n\n"
@@ -1778,7 +1789,7 @@ class ScreenCompanion(Star):
             logger.debug(f"获取天气信息失败: {e}")
 
         # 构建日记内容 - 符合标准日记格式
-        diary_content = f"# 诺星缘的日记\n\n"
+        diary_content = f"# {self.bot_name}的日记\n\n"
         diary_content += f"## {today.strftime('%Y年%m月%d日')} {weekday}\n\n"
         if weather_info:
             diary_content += f"**天气**: {weather_info}\n\n"
@@ -1793,7 +1804,7 @@ class ScreenCompanion(Star):
         provider = self.context.get_using_provider()
         if provider:
             # 构建基础提示词
-            summary_prompt = f"请以诺星缘的身份，根据以下观察记录，写一篇个人日记风格的总结。保持口语化的表达方式，符合女高中生的说话风格，要有情感和个性。可以分享自己的感受、想法和对未来的期待。\n\n{diary_content}"
+            summary_prompt = f"请以{self.bot_name}的身份，根据以下观察记录，写一篇个人日记风格的总结。保持口语化的表达方式，符合女高中生的说话风格，要有情感和个性。可以分享自己的感受、想法和对未来的期待。\n\n{diary_content}"
 
             # 参考前几天的日记
             if self.diary_reference_days > 0:
@@ -2037,12 +2048,35 @@ class ScreenCompanion(Star):
 
             # 计算音量
             audio_data = np.frombuffer(data, dtype=np.int16)
-            rms = np.sqrt(np.mean(np.square(audio_data)))
+            
+            # 检查audio_data是否为空
+            if len(audio_data) == 0:
+                logger.debug("音频数据为空")
+                return 0
+                
+            # 计算均值，处理可能的空数据
+            try:
+                square_data = np.square(audio_data)
+                mean_square = np.mean(square_data)
+                
+                # 检查mean_square是否为NaN
+                if np.isnan(mean_square):
+                    logger.debug("均值为NaN")
+                    return 0
+                    
+                rms = np.sqrt(mean_square)
+                
+                # 检查rms是否为NaN
+                if np.isnan(rms):
+                    logger.debug("RMS为NaN")
+                    return 0
 
-            # 将音量转换为0-100的范围
-            volume = min(100, int(rms / 32768 * 100 * 5))
-
-            return volume
+                # 将音量转换为0-100的范围
+                volume = min(100, int(rms / 32768 * 100 * 5))
+                return volume
+            except Exception as e:
+                logger.error(f"计算音量时出错: {e}")
+                return 0
         except ImportError:
             logger.debug("未安装pyaudio库，跳过麦克风音量检测")
             return 0
