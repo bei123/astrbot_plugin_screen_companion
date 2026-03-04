@@ -10,9 +10,8 @@ import tempfile
 import time
 import uuid
 
-# 默认的人格设定
-DEFAULT_SYSTEM_PROMPT = """角色设定：窥屏助手
-把你正在使用的人格复制到这里"""
+# 无法从人格设定管理器获取时的后备提示词（应通过 persona_manager.get_default_persona_v3 获取默认人格）
+_FALLBACK_SYSTEM_PROMPT = "角色设定：窥屏助手\n把你正在使用的人格复制到这里"
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -59,7 +58,10 @@ class ScreenCompanion(Star):
         # 麦克风监听相关
         self.enable_mic_monitor = self.config.get("enable_mic_monitor", False)
         self.mic_threshold = self.config.get("mic_threshold", 60)
-        self.mic_check_interval = max(1, self.config.get("mic_check_interval", 5))
+        if config.get("capture_source", "local") == "remote":
+            self.mic_check_interval = max(0.3, min(10, self.config.get("mic_check_interval", 1)))
+        else:
+            self.mic_check_interval = max(1, self.config.get("mic_check_interval", 5))
         self.last_mic_trigger = 0  # 上次触发时间，用于防抖
         self.mic_debounce_time = 60  # 防抖时间，单位秒
 
@@ -112,9 +114,25 @@ class ScreenCompanion(Star):
         if self.enable_learning:
             self._load_learning_data()
 
+        # 远程截图（Windows 推送到 Linux 服务器）相关
+        self.capture_source = config.get("capture_source", "local")  # "local" | "remote"
+        self.screen_relay_port = max(1, min(65535, int(config.get("screen_relay_port", 8765))))
+        self.screen_relay_bind = config.get("screen_relay_bind", "0.0.0.0")
+        self._latest_remote_image_bytes = None
+        self._latest_remote_window_title = ""
+        self._latest_remote_mic_level = 0
+        self._remote_image_event = asyncio.Event()
+        self._remote_relay_server = None
+        self._remote_relay_task = None
+
         # 任务调度器相关
         self.task_semaphore = asyncio.Semaphore(2)  # 限制同时运行的任务数
         self.task_queue = asyncio.Queue()
+
+        # 启动远程截图接收服务（仅 remote 模式）
+        if self.capture_source == "remote":
+            self._remote_relay_task = asyncio.create_task(self._run_screen_relay_server())
+            self.background_tasks.append(self._remote_relay_task)
 
         # 启动任务调度器
         task = asyncio.create_task(self._task_scheduler())
@@ -133,6 +151,19 @@ class ScreenCompanion(Star):
         task = asyncio.create_task(self._mic_monitor_task())
         self.background_tasks.append(task)
 
+    def _get_default_system_prompt(self, umo: str | None = None) -> str:
+        """通过人格设定管理器获取默认人格的系统提示词（见 docs.astrbot.app 人格设定管理器）。"""
+        persona_mgr = getattr(self.context, "persona_manager", None)
+        if persona_mgr is None:
+            return _FALLBACK_SYSTEM_PROMPT
+        try:
+            persona = persona_mgr.get_default_persona_v3(umo)
+            if persona and isinstance(persona, dict) and persona.get("prompt"):
+                return persona["prompt"]
+        except Exception as e:
+            logger.debug(f"获取默认人格失败，使用后备提示词: {e}")
+        return _FALLBACK_SYSTEM_PROMPT
+
     async def stop(self):
         """停止插件，清理所有任务"""
         logger.info("停止屏幕伴侣插件，清理所有任务")
@@ -147,6 +178,18 @@ class ScreenCompanion(Star):
         self.running = False
         self.enable_mic_monitor = False
 
+        # 关闭远程截图服务
+        if self._remote_relay_server:
+            self._remote_relay_server.close()
+            await self._remote_relay_server.wait_closed()
+            self._remote_relay_server = None
+        if self._remote_relay_task and not self._remote_relay_task.done():
+            self._remote_relay_task.cancel()
+            try:
+                await self._remote_relay_task
+            except asyncio.CancelledError:
+                pass
+
         # 取消所有后台任务
         for task in self.background_tasks:
             task.cancel()
@@ -154,29 +197,30 @@ class ScreenCompanion(Star):
         logger.info("所有后台任务已停止")
 
     def _check_dependencies(self, check_mic=False):
-        """检查并尝试导入必要库，避免在初始化时因缺少库导致整个插件加载失败"""
+        """检查并尝试导入必要库，避免在初始化时因缺少库导致整个插件加载失败。远程截图模式下不要求本机截屏相关库。"""
         """参数:
         check_mic: 是否检查麦克风依赖
         """
         missing_libs = []
-        try:
-            import pyautogui
-        except ImportError:
-            missing_libs.append("pyautogui")
-
-        try:
-            from PIL import Image as PILImage
-        except ImportError:
-            missing_libs.append("Pillow")
-
-        if (
-            sys.platform == "win32"
-            and self.config.get("capture_mode") == "active_window"
-        ):
+        if self.config.get("capture_source") != "remote":
             try:
-                import pygetwindow
+                import pyautogui
             except ImportError:
-                missing_libs.append("pygetwindow")
+                missing_libs.append("pyautogui")
+
+            try:
+                from PIL import Image as PILImage
+            except ImportError:
+                missing_libs.append("Pillow")
+
+            if (
+                sys.platform == "win32"
+                and self.config.get("capture_mode") == "active_window"
+            ):
+                try:
+                    import pygetwindow
+                except ImportError:
+                    missing_libs.append("pygetwindow")
 
         # 检查麦克风监听依赖
         if check_mic and self.enable_mic_monitor:
@@ -198,10 +242,13 @@ class ScreenCompanion(Star):
         return True, ""
 
     def _check_env(self, check_mic=False):
-        """检查桌面环境是否可用"""
+        """检查桌面环境是否可用（本地截图）或远程截图服务是否启用（远程模式）"""
         """参数:
         check_mic: 是否检查麦克风依赖
         """
+        if self.capture_source == "remote":
+            return True, ""
+
         dep_ok, dep_msg = self._check_dependencies(check_mic=check_mic)
         if not dep_ok:
             return False, dep_msg
@@ -231,8 +278,9 @@ class ScreenCompanion(Star):
             return False, f"环境检查异常: {str(e)}"
 
     async def _capture_screen_bytes(self):
-        """执行截图并返回字节流和活动窗口标题。"""
-        """返回值: (截图字节流, 活动窗口标题)"""
+        """执行截图并返回字节流和活动窗口标题。本地为 pyautogui；远程为接收 Windows 端推送的截图。"""
+        if self.capture_source == "remote":
+            return await self._capture_screen_bytes_remote()
 
         def _core_task():
             import pyautogui
@@ -251,10 +299,10 @@ class ScreenCompanion(Star):
                         active_window_title = window.title
                         screenshot = pyautogui.screenshot(
                             region=(
-                                window.left,
-                                window.top,
-                                window.width,
-                                window.height,
+                                int(window.left),
+                                int(window.top),
+                                int(window.width),
+                                int(window.height),
                             )
                         )
                 except Exception as e:
@@ -287,6 +335,102 @@ class ScreenCompanion(Star):
 
         result = await asyncio.to_thread(_core_task)
         return result
+
+    async def _run_screen_relay_server(self):
+        """在 Linux 服务器上监听端口，接收 Windows 端推送的截图。支持两种协议：
+        - 旧版：4B 标题长度(大端) + 标题 UTF-8 + 4B 图片长度(大端) + JPEG。
+        - 新版(0xFF)：1B 魔数 0xFF + 1B version + 3B 标题长度(大端) + 标题 + 4B 图片长度 + JPEG；version>=1 时帧尾多 1B 麦克风音量(0-100)。
+        """
+        import struct
+
+        async def _handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            try:
+                while self.running:
+                    try:
+                        first = await reader.readexactly(1)
+                        if first[0] == 0xFE:
+                            mic_b = await reader.readexactly(1)
+                            self._latest_remote_mic_level = min(100, max(0, mic_b[0]))
+                            continue
+                        if first[0] == 0xFF:
+                            version = (await reader.readexactly(1))[0]
+                            title_len_b = await reader.readexactly(3)
+                            title_len = struct.unpack(">I", b"\x00" + title_len_b)[0]
+                        else:
+                            version = 0
+                            title_len_b = await reader.readexactly(3)
+                            title_len = struct.unpack(">I", first + title_len_b)[0]
+                        title_bytes = await reader.readexactly(title_len) if title_len else b""
+                        active_window_title = title_bytes.decode("utf-8", errors="replace") if title_bytes else ""
+                        img_len_b = await reader.readexactly(4)
+                        img_len = struct.unpack(">I", img_len_b)[0]
+                        if img_len <= 0 or img_len > 20 * 1024 * 1024:
+                            break
+                        image_bytes = await reader.readexactly(img_len)
+                        mic_level = 0
+                        if version >= 1:
+                            try:
+                                mic_b = await reader.readexactly(1)
+                                mic_level = min(100, max(0, mic_b[0]))
+                            except asyncio.IncompleteReadError:
+                                pass
+                        self._latest_remote_image_bytes = image_bytes
+                        self._latest_remote_window_title = active_window_title
+                        self._latest_remote_mic_level = mic_level
+                        self._remote_image_event.set()
+                        logger.debug(
+                            f"收到远程截图: {len(image_bytes)} bytes, 窗口: {active_window_title[:50]}, 麦克风: {mic_level}"
+                        )
+                    except asyncio.IncompleteReadError:
+                        break
+                    except asyncio.CancelledError:
+                        break
+            except Exception as e:
+                logger.debug(f"远程截图连接处理结束: {e}")
+            finally:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+        try:
+            import socket as sock_module
+            sock = sock_module.socket(sock_module.AF_INET, sock_module.SOCK_STREAM)
+            sock.setsockopt(sock_module.SOL_SOCKET, sock_module.SO_REUSEADDR, 1)
+            sock.bind((self.screen_relay_bind, self.screen_relay_port))
+            sock.listen(128)
+            sock.setblocking(False)
+            self._remote_relay_server = await asyncio.start_server(
+                _handle_client,
+                sock=sock,
+            )
+            addr = self._remote_relay_server.sockets[0].getsockname()
+            logger.info(f"屏幕伴侣远程截图服务已启动，监听 {addr[0]}:{addr[1]}，等待 Windows 端连接并推送截图。")
+            async with self._remote_relay_server:
+                await self._remote_relay_server.serve_forever()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"远程截图服务异常: {e}")
+        finally:
+            if self._remote_relay_server:
+                self._remote_relay_server.close()
+                await self._remote_relay_server.wait_closed()
+                self._remote_relay_server = None
+            logger.info("屏幕伴侣远程截图服务已停止")
+
+    async def _capture_screen_bytes_remote(self):
+        """远程模式：使用 Windows 端已推送的最新截图。若尚未收到过截图则等待一段时间。"""
+        if self._latest_remote_image_bytes is not None:
+            return (bytes(self._latest_remote_image_bytes), self._latest_remote_window_title)
+        try:
+            await asyncio.wait_for(self._remote_image_event.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            return (b"", "未收到远程截图")
+        if self._latest_remote_image_bytes is None:
+            return (b"", "未收到远程截图")
+        return (bytes(self._latest_remote_image_bytes), self._latest_remote_window_title)
 
     async def _call_external_vision_api(self, image_bytes: bytes) -> str:
         """调用外接视觉API进行图像分析"""
@@ -349,6 +493,8 @@ class ScreenCompanion(Star):
                                 return choice["message"]["content"]
                             elif "text" in choice:
                                 return choice["text"]
+                            else:
+                                return "无法识别屏幕内容，API返回格式异常"
                         elif "response" in result:
                             return result["response"]
                         else:
@@ -664,16 +810,14 @@ class ScreenCompanion(Star):
             )
             return [Plain("现在不是我活跃的时间呢，让我休息一下~")]
 
-        provider = self.context.get_using_provider()
+        provider = getattr(self.context, "get_using_provider", lambda: None)()
         if not provider:
             logger.debug("未检测到已启用的 LLM 提供商")
             return [Plain("未检测到已启用的 LLM 提供商，无法进行视觉分析。")]
 
-        # 直接使用配置文件中的诺星缘人格设定
-        system_prompt = self.config.get("system_prompt", "")
-        if not system_prompt:
-            # 如果配置中没有设置，使用默认的诺星缘人格
-            system_prompt = DEFAULT_SYSTEM_PROMPT
+        # 优先使用配置中的系统提示词，否则通过人格设定管理器获取默认人格
+        umo = getattr(session, "unified_msg_origin", None)
+        system_prompt = self.config.get("system_prompt") or self._get_default_system_prompt(umo)
         logger.info(f"[任务 {task_id}] 使用诺星缘人格设定")
 
         debug_mode = self.config.get("debug", False)
@@ -742,8 +886,8 @@ class ScreenCompanion(Star):
             # 尝试获取对话历史，提供更连贯的交互
             contexts = []
             try:
-                if hasattr(self.context, "conversation_manager"):
-                    conv_mgr = self.context.conversation_manager
+                conv_mgr = getattr(self.context, "conversation_manager", None)
+                if conv_mgr is not None:
                     # 安全获取uid，处理session可能无效的情况
                     uid = ""
                     try:
@@ -867,8 +1011,14 @@ class ScreenCompanion(Star):
             logger.info("开始截图")
             # 添加超时机制，避免截图过程卡住
             image_bytes, active_window_title = await asyncio.wait_for(
-                self._capture_screen_bytes(), timeout=10.0
+                self._capture_screen_bytes(), timeout=15.0 if self.capture_source == "remote" else 10.0
             )
+            if not image_bytes:
+                yield event.plain_result(
+                    "未收到截图。"
+                    + ("请确保 Windows 端常驻程序已连接并推送截图。" if self.capture_source == "remote" else "")
+                )
+                return
             logger.info(
                 f"截图完成，大小: {len(image_bytes)} bytes, 活动窗口: {active_window_title}"
             )
@@ -899,7 +1049,7 @@ class ScreenCompanion(Star):
                     for i in range(len(segments) - 1):
                         segment = segments[i]
                         if segment.strip():
-                            await self.context.send_message(
+                            await getattr(self.context, "send_message")(
                                 event.unified_msg_origin, MessageChain([Plain(segment)])
                             )
                             # 添加小延迟，使回复更自然
@@ -921,8 +1071,8 @@ class ScreenCompanion(Star):
                     )
 
                     # 获取对话管理器
-                    if hasattr(self.context, "conversation_manager"):
-                        conv_mgr = self.context.conversation_manager
+                    conv_mgr = getattr(self.context, "conversation_manager", None)
+                    if conv_mgr is not None:
                         uid = event.unified_msg_origin
                         curr_cid = await conv_mgr.get_curr_conversation_id(uid)
 
@@ -1045,7 +1195,7 @@ class ScreenCompanion(Star):
         yield event.plain_result(f"✅ 已启动任务 {task_id}，我会时不时过来瞄一眼的~")
 
     @kpi_group.command("stop")
-    async def kpi_stop(self, event: AstrMessageEvent, task_id: str = None):
+    async def kpi_stop(self, event: AstrMessageEvent, task_id: str | None = None):
         """停止自动观察任务"""
         if task_id:
             # 停止指定任务
@@ -1143,7 +1293,7 @@ class ScreenCompanion(Star):
             yield event.plain_result("用法: /kpi add [间隔秒数] [自定义提示词]")
 
     @kpi_group.command("diary")
-    async def kpi_diary(self, event: AstrMessageEvent, date: str = None):
+    async def kpi_diary(self, event: AstrMessageEvent, date: str | None = None):
         """查看特定日期的日记 /kpi diary [YYYY-MM-DD]"""
         import datetime
         import os
@@ -1179,11 +1329,11 @@ class ScreenCompanion(Star):
                 diary_content = f.read()
 
             # 生成日记被偷看的回应
-            provider = self.context.get_using_provider()
+            provider = getattr(self.context, "get_using_provider", lambda: None)()
             if provider:
                 try:
-                    system_prompt = self.config.get(
-                        "system_prompt", DEFAULT_SYSTEM_PROMPT
+                    system_prompt = self.config.get("system_prompt") or self._get_default_system_prompt(
+                        event.unified_msg_origin
                     )
                     response = await provider.text_chat(
                         prompt=self.diary_response_prompt, system_prompt=system_prompt
@@ -1244,10 +1394,12 @@ class ScreenCompanion(Star):
         days = max(1, min(7, int(days)))  # 限制1-7天
 
         # 生成日记被偷看的回应
-        provider = self.context.get_using_provider()
+        provider = getattr(self.context, "get_using_provider", lambda: None)()
         if provider:
             try:
-                system_prompt = self.config.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
+                system_prompt = self.config.get("system_prompt") or self._get_default_system_prompt(
+                    event.unified_msg_origin
+                )
                 response = await provider.text_chat(
                     prompt=self.diary_response_prompt, system_prompt=system_prompt
                 )
@@ -1380,7 +1532,7 @@ class ScreenCompanion(Star):
             diary_content += f"{entry['content']}\n\n"
 
         # 生成风格化的总结
-        provider = self.context.get_using_provider()
+        provider = getattr(self.context, "get_using_provider", lambda: None)()
         if provider:
             # 构建基础提示词
             summary_prompt = f"请以诺星缘的身份，根据以下观察记录，写一篇风格化的日记总结。保持口语化的表达方式，符合女高中生的说话风格，要有情感和个性。\n\n{diary_content}"
@@ -1416,9 +1568,8 @@ class ScreenCompanion(Star):
                     summary_prompt += "\n请结合前几天的日记内容，保持日记风格的连贯性，写出今天的总结。"
 
             try:
-                system_prompt = self.config.get(
-                    "system_prompt",
-                    "你是一个幽默、敏锐的屏幕观察伴侣。你会根据用户当前的屏幕截图，以朋友的口吻对用户的行为进行简短的吐槽、互动或提供建议。",
+                system_prompt = self.config.get("system_prompt") or self._get_default_system_prompt(
+                    None
                 )
                 response = await provider.text_chat(
                     prompt=summary_prompt, system_prompt=system_prompt
@@ -1651,7 +1802,7 @@ class ScreenCompanion(Star):
 
             import pyaudio
 
-            logger.info(f"[麦克风依赖检查] PyAudio已加载: {pyaudio.__version__}")
+            logger.info(f"[麦克风依赖检查] PyAudio已加载: {getattr(pyaudio, '__version__', 'unknown')}")
 
             import numpy
 
@@ -1664,6 +1815,11 @@ class ScreenCompanion(Star):
             import traceback
 
             logger.warning(f"[麦克风依赖检查] 详细错误: {traceback.format_exc()}")
+
+        # 远程模式下使用 Windows 端推送的麦克风音量，无需本机 pyaudio
+        use_remote_mic = self.capture_source == "remote"
+        if use_remote_mic:
+            mic_deps_ok = True
 
         while self.enable_mic_monitor:
             try:
@@ -1679,16 +1835,19 @@ class ScreenCompanion(Star):
                     await asyncio.sleep(self.mic_check_interval)
                     continue
 
-                # 获取麦克风音量
-                volume = self._get_microphone_volume()
+                # 获取麦克风音量：远程模式用 Windows 端推送的值，本机用 pyaudio
+                if use_remote_mic:
+                    volume = self._latest_remote_mic_level
+                else:
+                    volume = self._get_microphone_volume()
                 logger.debug(f"麦克风音量: {volume}")
 
                 # 检查音量是否超过阈值
                 if volume > self.mic_threshold:
                     logger.info(f"麦克风音量超过阈值: {volume} > {self.mic_threshold}")
 
-                    # 检查环境
-                    ok, err_msg = self._check_env(check_mic=True)
+                    # 检查环境（远程模式不检查本机麦克风依赖）
+                    ok, err_msg = self._check_env(check_mic=not use_remote_mic)
                     if not ok:
                         logger.error(f"麦克风触发失败: {err_msg}")
                         await asyncio.sleep(self.mic_check_interval)
@@ -1702,19 +1861,24 @@ class ScreenCompanion(Star):
                                 self.unified_msg_origin = self._get_default_target()
 
                             def _get_default_target(self):
-                                admin_qq = self.config.get("admin_qq", "")
+                                config = getattr(self, "config", {})
+                                admin_qq = config.get("admin_qq", "")
                                 if admin_qq:
-                                    return f"aiocqhttp:private_message:{admin_qq}"
+                                    return f"aiocqhttp:FriendMessage:{admin_qq}"
                                 return ""
 
                         # 绑定config到VirtualEvent
-                        VirtualEvent.config = self.config
+                        setattr(VirtualEvent, "config", self.config)
 
                         event = VirtualEvent()
 
                         image_bytes, active_window_title = await asyncio.wait_for(
-                            self._capture_screen_bytes(), timeout=10.0
+                            self._capture_screen_bytes(), timeout=15.0 if self.capture_source == "remote" else 10.0
                         )
+                        if not image_bytes:
+                            logger.warning("麦克风触发时未获取到截图，跳过本次分析")
+                            await asyncio.sleep(self.mic_check_interval)
+                            continue
                         components = await asyncio.wait_for(
                             self._analyze_screen(
                                 image_bytes,
@@ -1731,7 +1895,7 @@ class ScreenCompanion(Star):
                         if not target:
                             admin_qq = self.config.get("admin_qq", "")
                             if admin_qq:
-                                target = f"aiocqhttp:private_message:{admin_qq}"
+                                target = f"aiocqhttp:FriendMessage:{admin_qq}"
 
                         if target:
                             # 提取文本内容并发送
@@ -1742,7 +1906,7 @@ class ScreenCompanion(Star):
 
                             if text_content:
                                 message = f"【声音提醒】\n{text_content}"
-                                await self.context.send_message(
+                                await getattr(self.context, "send_message")(
                                     target, MessageChain([Plain(message)])
                                 )
                                 logger.info("麦克风触发消息已发送")
@@ -1782,8 +1946,11 @@ class ScreenCompanion(Star):
                         # 执行屏幕分析
                         try:
                             image_bytes, active_window_title = await asyncio.wait_for(
-                                self._capture_screen_bytes(), timeout=10.0
+                                self._capture_screen_bytes(), timeout=15.0 if self.capture_source == "remote" else 10.0
                             )
+                            if not image_bytes:
+                                logger.warning("自定义任务未获取到截图，跳过本次")
+                                continue
                             components = await asyncio.wait_for(
                                 self._analyze_screen(
                                     image_bytes,
@@ -1799,7 +1966,7 @@ class ScreenCompanion(Star):
                             if not target:
                                 admin_qq = self.config.get("admin_qq", "")
                                 if admin_qq:
-                                    target = f"aiocqhttp:private_message:{admin_qq}"
+                                    target = f"aiocqhttp:FriendMessage:{admin_qq}"
 
                             if target:
                                 # 提取文本内容并发送
@@ -1810,7 +1977,7 @@ class ScreenCompanion(Star):
 
                                 if text_content:
                                     message = f"【定时提醒】\n{text_content}"
-                                    await self.context.send_message(
+                                    await getattr(self.context, "send_message")(
                                         target, MessageChain([Plain(message)])
                                     )
                                     logger.info("自定义任务消息已发送")
@@ -1865,7 +2032,7 @@ class ScreenCompanion(Star):
         event: AstrMessageEvent,
         task_id: str = "default",
         custom_prompt: str = "",
-        interval: int = None,
+        interval: int | None = None,
     ):
         """后台自动截图分析任务"""
         """参数:
@@ -1877,7 +2044,7 @@ class ScreenCompanion(Star):
         try:
             while self.is_running:
                 # 检查任务是否被取消
-                if asyncio.current_task().cancelled():
+                if getattr(asyncio.current_task(), "cancelled", lambda: False)():
                     logger.info(f"[任务 {task_id}] 任务被取消")
                     break
 
@@ -1969,7 +2136,7 @@ class ScreenCompanion(Star):
                 logger.info(f"[任务 {task_id}] 等待 {check_interval} 秒后进行触发判定")
                 elapsed = 0
                 while elapsed < check_interval:
-                    if not self.is_running or asyncio.current_task().cancelled():
+                    if not self.is_running or getattr(asyncio.current_task(), "cancelled", lambda: False)():
                         break
                     # 每10秒检查一次互动模式是否改变
                     if elapsed % 10 == 0 and interval is None:
@@ -1990,7 +2157,7 @@ class ScreenCompanion(Star):
                     await asyncio.sleep(1)
                     elapsed += 1
 
-                if not self.is_running or asyncio.current_task().cancelled():
+                if not self.is_running or getattr(asyncio.current_task(), "cancelled", lambda: False)():
                     logger.info(f"[任务 {task_id}] 任务停止标志被设置，退出任务")
                     break
 
@@ -2060,7 +2227,7 @@ class ScreenCompanion(Star):
                     logger.info(f"[任务 {task_id}] 触发判定通过，开始执行屏幕分析")
                     try:
                         # 再次检查is_running标志和任务取消状态
-                        if not self.is_running or asyncio.current_task().cancelled():
+                        if not self.is_running or getattr(asyncio.current_task(), "cancelled", lambda: False)():
                             logger.info(
                                 f"[任务 {task_id}] 任务停止标志被设置，取消屏幕分析"
                             )
@@ -2080,8 +2247,11 @@ class ScreenCompanion(Star):
                             break
 
                         image_bytes, active_window_title = await asyncio.wait_for(
-                            self._capture_screen_bytes(), timeout=10.0
+                            self._capture_screen_bytes(), timeout=15.0 if self.capture_source == "remote" else 10.0
                         )
+                        if not image_bytes:
+                            logger.warning("自动观察未获取到截图，跳过本轮")
+                            continue
                         components = await asyncio.wait_for(
                             self._analyze_screen(
                                 image_bytes,
@@ -2103,7 +2273,7 @@ class ScreenCompanion(Star):
                             admin_qq = self.config.get("admin_qq", "")
                             if admin_qq:
                                 # 使用管理员QQ号构建目标
-                                target = f"aiocqhttp:private_message:{admin_qq}"
+                                target = f"aiocqhttp:FriendMessage:{admin_qq}"
                                 logger.info(f"使用管理员QQ号构建消息目标: {target}")
                             else:
                                 # 回退到原始事件的目标
@@ -2114,7 +2284,7 @@ class ScreenCompanion(Star):
                                     logger.error(f"获取原始事件目标失败: {e}")
                                     # 使用默认目标
                                     target = (
-                                        f"aiocqhttp:private_message:{admin_qq}"
+                                        f"aiocqhttp:FriendMessage:{admin_qq}"
                                         if admin_qq
                                         else ""
                                     )
@@ -2140,13 +2310,13 @@ class ScreenCompanion(Star):
                                 for i in range(len(segments) - 1):
                                     if (
                                         not self.is_running
-                                        or asyncio.current_task().cancelled()
+                                        or getattr(asyncio.current_task(), "cancelled", lambda: False)()
                                     ):
                                         break
                                     segment = segments[i]
                                     if segment.strip():
                                         # 不需要添加前缀，让回复更自然
-                                        await self.context.send_message(
+                                        await getattr(self.context, "send_message")(
                                             event.unified_msg_origin,
                                             MessageChain([Plain(segment)]),
                                         )
@@ -2155,10 +2325,10 @@ class ScreenCompanion(Star):
                                 # 最后一段
                                 if (
                                     self.is_running
-                                    and not asyncio.current_task().cancelled()
+                                    and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
                                     and segments[-1].strip()
                                 ):
-                                    await self.context.send_message(
+                                    await getattr(self.context, "send_message")(
                                         event.unified_msg_origin,
                                         MessageChain([Plain(segments[-1])]),
                                     )
@@ -2166,9 +2336,9 @@ class ScreenCompanion(Star):
                                 # 只有一段，直接发送
                                 if (
                                     self.is_running
-                                    and not asyncio.current_task().cancelled()
+                                    and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
                                 ):
-                                    await self.context.send_message(
+                                    await getattr(self.context, "send_message")(
                                         event.unified_msg_origin,
                                         MessageChain([Plain(text_content)]),
                                     )
@@ -2176,9 +2346,9 @@ class ScreenCompanion(Star):
                             # 发送带图片的消息
                             if (
                                 self.is_running
-                                and not asyncio.current_task().cancelled()
+                                and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
                             ):
-                                await self.context.send_message(
+                                await getattr(self.context, "send_message")(
                                     event.unified_msg_origin, chain
                                 )
 
@@ -2191,8 +2361,8 @@ class ScreenCompanion(Star):
                             )
 
                             # 获取对话管理器
-                            if hasattr(self.context, "conversation_manager"):
-                                conv_mgr = self.context.conversation_manager
+                            conv_mgr = getattr(self.context, "conversation_manager", None)
+                            if conv_mgr is not None:
                                 uid = event.unified_msg_origin
                                 curr_cid = await conv_mgr.get_curr_conversation_id(uid)
 

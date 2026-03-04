@@ -60,12 +60,34 @@
   "capture_mode": {
     "description": "截图区域",
     "type": "string",
-    "hint": "选择截取全屏还是活动窗口（注：部分系统环境下活动窗口模式可能失效）。",
+    "hint": "选择截取全屏还是活动窗口（注：部分系统环境下活动窗口模式可能失效）。仅在本机截屏（截图来源为「本机」）时生效。",
     "default": "fullscreen",
     "options": [
       "fullscreen",
       "active_window"
     ]
+  },
+  "capture_source": {
+    "description": "截图来源",
+    "type": "string",
+    "hint": "本机：在运行 AstrBot 的机器上直接截屏（需图形界面）。远程：由 Windows 端常驻程序推送截图到本插件，适用于 AstrBot 跑在无桌面的 Linux 服务器时。选「远程」时需在下方填写插件暴露的端口，并在 Windows 上运行 screen_relay_client_win.py。",
+    "default": "local",
+    "options": [
+      "local",
+      "remote"
+    ]
+  },
+  "screen_relay_port": {
+    "description": "远程截图监听端口",
+    "type": "int",
+    "hint": "当截图来源为「远程」时，插件在本机监听的 TCP 端口号（1-65535）。Windows 端推送程序需连接此端口。请确保防火墙放行该端口。",
+    "default": 8765
+  },
+  "screen_relay_bind": {
+    "description": "远程截图监听地址",
+    "type": "string",
+    "hint": "当截图来源为「远程」时，插件绑定的网卡地址。默认 0.0.0.0 表示接受所有网卡的连接。",
+    "default": "0.0.0.0"
   },
   "image_quality": {
     "description": "截图压缩质量",
@@ -170,7 +192,7 @@
   "proactive_target": {
     "description": "主动消息推送目标",
     "type": "string",
-    "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。如果不填写，插件将尝试使用管理员QQ号构建目标。格式参考：aiocqhttp:private_message:123456",
+    "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。如果不填写，插件将尝试使用管理员QQ号构建目标。格式参考：aiocqhttp:FriendMessage:123456",
     "default": ""
   },
   "save_local": {
