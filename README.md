@@ -10,7 +10,7 @@
 ---
 
 ## 支持的环境
-- Windows 桌面环境：需要安装[ScreenShotter](https://github.com/menglimi/ScreenShotter)
+- Windows 桌面环境：需要授予屏幕录制权限
 - macOS 桌面环境：需要授予屏幕录制权限
 - 带桌面的Linux环境：需要图形界面支持
 
