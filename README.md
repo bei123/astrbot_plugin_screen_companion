@@ -27,7 +27,9 @@ git clone https://github.com/menglimi/astrbot_plugin_screen_companion.git
 2.安装依赖：
 基本依赖：pyautogui 和 Pillow（通常由插件自动处理）
 麦克风监听功能依赖：pyaudio 和 numpy
-Windows活动窗口支持：pygetwindow（可选，用于获取活动窗口信息）
+Windows活动窗口支持：pygetwindow（用于获取活动窗口信息）
+网络请求依赖：aiohttp（用于调用外部API）
+系统状态检测依赖：psutil（用于检测系统资源使用情况）
 
 3.系统权限设置：
 在macOS或Windows上，运行AstrBot的终端/IDE可能需要"屏幕录制"权限
