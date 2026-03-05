@@ -26,7 +26,7 @@ class ScreenCompanion(Star):
 
         super().__init__(context)
         self.config = config
-        self.bot_name = config.get("bot_name", "诺星缘")
+        self.bot_name = config.get("bot_name", "屏幕助手")
         self.auto_tasks = {}
         self.is_running = False
         self.task_counter = 0
@@ -1418,9 +1418,9 @@ class ScreenCompanion(Star):
                 diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
             else:
                 # 尝试提取旧格式的总结部分
-                summary_start = diary_content.find("## 诺星缘的总结")
+                summary_start = diary_content.find(f"## {self.bot_name}的总结")
                 if summary_start == -1:
-                    summary_start = diary_content.find(f"## {self.bot_name}的总结")
+                    summary_start = diary_content.find("## 总结")
                 if summary_start != -1:
                     summary_content = diary_content[summary_start:]
                     # 提取总结文本，去除标题
@@ -1432,7 +1432,7 @@ class ScreenCompanion(Star):
                     diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
                 else:
                     # 如果没有感想或总结部分，使用整个日记内容（限制500字）
-                    diary_text = diary_content.replace('# 诺星缘的日记', '').replace(f'# {self.bot_name}的日记', '').replace('# 诺星缘的观察日记', '').replace(f'# {self.bot_name}的观察日记', '').replace(f'{target_date.strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
+                    diary_text = diary_content.replace(f'# {self.bot_name}的日记', '').replace(f'# {self.bot_name}的观察日记', '').replace(f'{target_date.strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
                     if len(diary_text) > 500:
                         diary_text = diary_text[:497] + "..."
                     diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{diary_text}"
@@ -1579,9 +1579,9 @@ class ScreenCompanion(Star):
                 diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
             else:
                 # 尝试提取旧格式的总结部分
-                summary_start = diary['content'].find("## 诺星缘的总结")
+                summary_start = diary['content'].find(f"## {self.bot_name}的总结")
                 if summary_start == -1:
-                    summary_start = diary['content'].find(f"## {self.bot_name}的总结")
+                    summary_start = diary['content'].find("## 总结")
                 if summary_start != -1:
                     summary_content = diary['content'][summary_start:]
                     # 提取总结文本，去除标题
@@ -1593,7 +1593,7 @@ class ScreenCompanion(Star):
                     diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
                 else:
                     # 如果没有感想或总结部分，使用整个日记内容（限制500字）
-                    diary_text = diary['content'].replace('# 诺星缘的日记', '').replace(f'# {self.bot_name}的日记', '').replace('# 诺星缘的观察日记', '').replace(f'# {self.bot_name}的观察日记', '').replace(f'{diary["date"].strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
+                    diary_text = diary['content'].replace(f'# {self.bot_name}的日记', '').replace(f'# {self.bot_name}的观察日记', '').replace(f'{diary["date"].strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
                     if len(diary_text) > 500:
                         diary_text = diary_text[:497] + "..."
                     diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary_text}"

@@ -3,7 +3,7 @@
     "description": "角色名称",
     "type": "string",
     "hint": "机器人的角色名称，用于日记和互动中",
-    "default": "诺星缘"
+    "default": "屏幕助手"
   },
   "system_prompt": {
     "description": "系统提示词",
