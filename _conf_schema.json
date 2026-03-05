@@ -5,6 +5,17 @@
     "hint": "机器人的角色名称，用于日记和互动中",
     "default": "诺星缘"
   },
+  "system_prompt": {
+    "description": "系统提示词",
+    "type": "text",
+    "hint": "定义角色的人格设定，未配置时将使用 AstrBot 框架的默认人格。",
+    "default": "角色设定：窥屏助手\n把你正在使用的人格复制到这里",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true
+    }
+  },
   "enabled": {
     "description": "是否开启自动截图互动",
     "type": "bool",
@@ -192,7 +203,7 @@
     "description": "开始 LLM 提示词",
     "type": "text",
     "hint": "使用 LLM 模式时的开始回复提示词",
-    "default": "现在你开始监控用户的屏幕，用调皮可爱的语气和他打招呼，表现出你要开始偷看他的屏幕了，语气要符合活泼可爱的AI助手风格，简短自然。",
+    "default": "以你的性格向用户表达你会开始偶尔地偷看用户的屏幕了，尽可能简短，保持在一句话内。",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
@@ -204,7 +215,7 @@
     "description": "结束 LLM 提示词",
     "type": "text",
     "hint": "使用 LLM 模式时的结束回复提示词",
-    "default": "现在你结束监控用户的屏幕，用调皮可爱的语气和他告别，表现出你要停止偷看了，语气要符合活泼可爱的AI助手风格，简短自然。",
+    "default": "以你的性格向用户表达你停止看用户的屏幕了，尽可能简短，保持在一句话内。",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
@@ -288,7 +299,7 @@
     "description": "日记生成提示词",
     "type": "text",
     "hint": "用于生成日记内容的提示词",
-    "default": "请以活泼可爱的AI助手的身份写一篇日记，记录今天的观察和感受。内容包括：1. 观察到用户今天做了什么（基于屏幕监控） 2. 对用户行为的推理和猜测 3. 融入自己的性格进行吐槽和锐评 4. 如果前一天的日记被偷看过，要加入警告内容 5. 使用口语化的表达，保持活泼可爱的语气，加入适当的语气词。不要只是单纯总结，要加入自己的想法和情感。",
+    "default": "请根据今天的观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。不要只是对观察记录的生硬总结，而是要融合你的经历和情感，生成一个更个人化的日记。请字数控制在400字左右。",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
