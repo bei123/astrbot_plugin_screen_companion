@@ -35,6 +35,8 @@ class ScreenCompanion(Star):
         # 状态管理
         self.state = "inactive"  # active, inactive, temporary
         self.temporary_tasks = {}
+        # 固定自动化任务ID
+        self.AUTO_TASK_ID = "task_0"
 
         # 日记功能相关
         self.enable_diary = config.get("enable_diary", False)
@@ -1301,13 +1303,16 @@ class ScreenCompanion(Star):
                 yield event.plain_result(f"启动失败：\n{err_msg}")
                 return
 
+            # 检查是否已有自动化任务
+            if self.AUTO_TASK_ID in self.auto_tasks:
+                logger.info("自动化任务已存在，无需重复启动")
+                return
+
             self.state = "active"
             self.is_running = True
-            task_id = f"task_{self.task_counter}"
-            self.task_counter += 1
-            logger.info(f"启动任务 {task_id}")
-            self.auto_tasks[task_id] = asyncio.create_task(
-                self._auto_screen_task(event, task_id=task_id)
+            logger.info(f"启动任务 {self.AUTO_TASK_ID}")
+            self.auto_tasks[self.AUTO_TASK_ID] = asyncio.create_task(
+                self._auto_screen_task(event, task_id=self.AUTO_TASK_ID)
             )
             start_response = await self._get_start_response()
             yield event.plain_result(start_response)
@@ -1331,17 +1336,20 @@ class ScreenCompanion(Star):
             yield event.plain_result(f"启动失败：\n{err_msg}")
             return
 
+        # 检查是否已有自动化任务
+        if self.AUTO_TASK_ID in self.auto_tasks:
+            logger.info("自动化任务已存在，无需重复启动")
+            return
+
         # 设置为活动状态
         self.state = "active"
-        if not self.is_running:
-            self.is_running = True
-        task_id = f"task_{self.task_counter}"
-        self.task_counter += 1
-        self.auto_tasks[task_id] = asyncio.create_task(
-            self._auto_screen_task(event, task_id=task_id)
+        self.is_running = True
+        logger.info(f"启动任务 {self.AUTO_TASK_ID}")
+        self.auto_tasks[self.AUTO_TASK_ID] = asyncio.create_task(
+            self._auto_screen_task(event, task_id=self.AUTO_TASK_ID)
         )
         start_response = await self._get_start_response()
-        yield event.plain_result(f"✅ 已启动任务 {task_id}，{start_response}")
+        yield event.plain_result(f"✅ 已启动任务 {self.AUTO_TASK_ID}，{start_response}")
 
     @kpi_group.command("stop")
     async def kpi_stop(self, event: AstrMessageEvent, task_id: str = None):
@@ -1375,7 +1383,7 @@ class ScreenCompanion(Star):
             # 设置为非活动状态
             self.state = "inactive"
 
-            # 停止所有自动任务
+            # 停止所有自动任务（只停止自动化任务，不停止临时任务）
             tasks_to_cancel = list(self.auto_tasks.items())
             for task_id, task in tasks_to_cancel:
                 logger.info(f"取消任务 {task_id}")
@@ -2542,7 +2550,7 @@ class ScreenCompanion(Star):
         """
         logger.info(f"[任务 {task_id}] 启动任务")
         try:
-            while self.is_running:
+            while self.is_running and self.state == "active":
                 if not self._is_in_active_time_range():
                     logger.info(f"[任务 {task_id}] 当前时间不在活跃时间段内，停止任务")
                     # 清理任务
@@ -2551,6 +2559,7 @@ class ScreenCompanion(Star):
                     # 检查是否还有其他任务在运行
                     if not self.auto_tasks:
                         self.is_running = False
+                        self.state = "inactive"
                     break
 
                 # 检查互动模式和参数变化
@@ -2630,8 +2639,8 @@ class ScreenCompanion(Star):
                 logger.info(f"[任务 {task_id}] 等待 {check_interval} 秒后进行触发判定")
                 elapsed = 0
                 while elapsed < check_interval:
-                    if not self.is_running:
-                        logger.info(f"[任务 {task_id}] 检测到停止标志，退出等待")
+                    if not self.is_running or self.state != "active":
+                        logger.info(f"[任务 {task_id}] 检测到停止标志或状态变更，退出等待")
                         break
                     try:
                         if elapsed % 10 == 0 and interval is None:
@@ -2655,8 +2664,8 @@ class ScreenCompanion(Star):
                         logger.info(f"[任务 {task_id}] 等待期间收到取消信号")
                         raise
 
-                if not self.is_running:
-                    logger.info(f"[任务 {task_id}] 任务停止标志被设置，退出任务")
+                if not self.is_running or self.state != "active":
+                    logger.info(f"[任务 {task_id}] 任务停止标志被设置或状态变更，退出任务")
                     break
 
                 # 再次检查是否在活跃时间段内
