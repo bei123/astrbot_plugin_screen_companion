@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 # 无法从人格设定管理器获取时的后备提示词（应通过 persona_manager.get_default_persona_v3 获取默认人格）
 _FALLBACK_SYSTEM_PROMPT = "角色设定：窥屏助手\n把你正在使用的人格复制到这里"
@@ -339,13 +339,12 @@ class ScreenCompanion(Star):
         except Exception as e:
             return False, f"环境检查异常: {str(e)}"
 
-    async def _get_persona_prompt(self, umo: str = None) -> str:
+    async def _get_persona_prompt(self, umo: Optional[str] = None) -> str:
         """获取框架人格的系统提示词"""
         try:
-            if hasattr(self.context, "persona_manager"):
-                persona = await self.context.persona_manager.get_default_persona_v3(
-                    umo=umo
-                )
+            persona_manager = getattr(self.context, "persona_manager", None)
+            if persona_manager is not None:
+                persona = await persona_manager.get_default_persona_v3(umo=umo)
                 if persona and "prompt" in persona:
                     return persona["prompt"]
         except Exception as e:
@@ -354,7 +353,7 @@ class ScreenCompanion(Star):
         config_prompt = self.config.get("system_prompt", "")
         if config_prompt:
             return config_prompt
-        return DEFAULT_SYSTEM_PROMPT
+        return _FALLBACK_SYSTEM_PROMPT
 
     async def _get_start_response(self) -> str:
         """获取开始监控的回复"""
@@ -362,7 +361,8 @@ class ScreenCompanion(Star):
         if mode == "preset":
             return self.config.get("start_preset", "知道啦~我会时不时过来看一眼的")
         else:
-            provider = self.context.get_using_provider()
+            get_using_provider = getattr(self.context, "get_using_provider", None)
+            provider = get_using_provider() if get_using_provider else None
             if provider:
                 try:
                     system_prompt = await self._get_persona_prompt()
@@ -388,7 +388,8 @@ class ScreenCompanion(Star):
         if mode == "preset":
             return self.config.get("end_preset", "好啦，我不看了～下次再陪你玩！")
         else:
-            provider = self.context.get_using_provider()
+            get_using_provider = getattr(self.context, "get_using_provider", None)
+            provider = get_using_provider() if get_using_provider else None
             if provider:
                 try:
                     system_prompt = await self._get_persona_prompt()
@@ -1842,7 +1843,9 @@ class ScreenCompanion(Star):
 
             # 同时生成日记被偷看的回应（异步进行）
             async def generate_blame():
-                provider = self.context.get_using_provider()
+                get_using_provider = getattr(self.context, "get_using_provider", None)
+                provider = get_using_provider() if get_using_provider else None
+                send_message = getattr(self.context, "send_message", None)
                 if provider:
                     try:
                         system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
@@ -1854,26 +1857,30 @@ class ScreenCompanion(Star):
                             and hasattr(response, "completion_text")
                             and response.completion_text
                         ):
-                            await self.context.send_message(
-                                event.unified_msg_origin,
-                                MessageChain([Plain(response.completion_text)])
-                            )
+                            if send_message is not None:
+                                await send_message(
+                                    event.unified_msg_origin,
+                                    MessageChain([Plain(response.completion_text)])
+                                )
                         else:
-                            await self.context.send_message(
+                            if send_message is not None:
+                                await send_message(
+                                    event.unified_msg_origin,
+                                    MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
+                                )
+                    except Exception as e:
+                        logger.error(f"生成日记被偷看回应失败: {e}")
+                        if send_message is not None:
+                            await send_message(
                                 event.unified_msg_origin,
                                 MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
                             )
-                    except Exception as e:
-                        logger.error(f"生成日记被偷看回应失败: {e}")
-                        await self.context.send_message(
+                else:
+                    if send_message is not None:
+                        await send_message(
                             event.unified_msg_origin,
                             MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
                         )
-                else:
-                    await self.context.send_message(
-                        event.unified_msg_origin,
-                        MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
-                    )
 
             # 异步生成责备回应
             blame_task = asyncio.create_task(generate_blame())
@@ -2013,7 +2020,9 @@ class ScreenCompanion(Star):
 
         # 同时生成日记被偷看的回应（异步进行）
         async def generate_blame():
-            provider = self.context.get_using_provider()
+            get_using_provider = getattr(self.context, "get_using_provider", None)
+            provider = get_using_provider() if get_using_provider else None
+            send_message = getattr(self.context, "send_message", None)
             if provider:
                 try:
                     system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
@@ -2025,33 +2034,37 @@ class ScreenCompanion(Star):
                         and hasattr(response, "completion_text")
                         and response.completion_text
                     ):
-                        await self.context.send_message(
-                            event.unified_msg_origin,
-                            MessageChain([Plain(response.completion_text)])
-                        )
+                        if send_message is not None:
+                            await send_message(
+                                event.unified_msg_origin,
+                                MessageChain([Plain(response.completion_text)])
+                            )
                     else:
-                        await self.context.send_message(
+                        if send_message is not None:
+                            await send_message(
+                                event.unified_msg_origin,
+                                MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
+                            )
+                except Exception as e:
+                    logger.error(f"生成日记被偷看回应失败: {e}")
+                    if send_message is not None:
+                        await send_message(
                             event.unified_msg_origin,
                             MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
                         )
-                except Exception as e:
-                    logger.error(f"生成日记被偷看回应失败: {e}")
-                    await self.context.send_message(
+            else:
+                if send_message is not None:
+                    await send_message(
                         event.unified_msg_origin,
                         MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
                     )
-            else:
-                await self.context.send_message(
-                    event.unified_msg_origin,
-                    MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
-                )
 
         # 异步生成责备回应
         blame_task = asyncio.create_task(generate_blame())
         self.background_tasks.append(blame_task)
 
     @kpi_group.command("debug")
-    async def kpi_debug(self, event: AstrMessageEvent, status: str = None):
+    async def kpi_debug(self, event: AstrMessageEvent, status: Optional[str] = None):
         """切换调试模式 /kpi debug [on/off]"""
         if status is None:
             # 显示当前状态
@@ -2071,18 +2084,18 @@ class ScreenCompanion(Star):
             yield event.plain_result("用法: /kpi debug [on/off]")
 
     @kpi_group.command("complete")
-    async def kpi_complete(self, event: AstrMessageEvent, date: str = None):
+    async def kpi_complete(self, event: AstrMessageEvent, date: Optional[str] = None):
         """补写日记 /kpi complete [YYYY-MM-DD]"""
         async for result in self._handle_complete_command(event, date):
             yield result
 
     @kpi_group.command("cd")
-    async def kpi_cd(self, event: AstrMessageEvent, date: str = None):
+    async def kpi_cd(self, event: AstrMessageEvent, date: Optional[str] = None):
         """补写日记（简化版） /kpi cd [YYYYMMDD]"""
         async for result in self._handle_complete_command(event, date):
             yield result
 
-    async def _handle_complete_command(self, event: AstrMessageEvent, date: str = None):
+    async def _handle_complete_command(self, event: AstrMessageEvent, date: Optional[str] = None):
         """处理日记补写命令"""
         import datetime
         import os
@@ -2119,7 +2132,8 @@ class ScreenCompanion(Star):
             return
 
         # 生成补写日记
-        provider = self.context.get_using_provider()
+        get_using_provider = getattr(self.context, "get_using_provider", None)
+        provider = get_using_provider() if get_using_provider else None
         if not provider:
             yield event.plain_result("未检测到已启用的 LLM 提供商，无法生成日记。")
             return
@@ -2601,11 +2615,13 @@ class ScreenCompanion(Star):
                             try:
                                 # 创建一个虚拟的event对象，用于传递给_analyze_screen
                                 class VirtualEvent:
+                                    config: Any = None  # 由下方绑定，供类型检查识别
+
                                     def __init__(self):
                                         self.unified_msg_origin = self._get_default_target()
 
                                     def _get_default_target(self):
-                                        admin_qq = self.config.get("admin_qq", "")
+                                        admin_qq = (self.config or {}).get("admin_qq", "")
                                         if admin_qq:
                                             return f"aiocqhttp:FriendMessage:{admin_qq}"
                                         return ""
@@ -2648,9 +2664,11 @@ class ScreenCompanion(Star):
 
                                     if text_content:
                                         message = f"【声音提醒】\n{text_content}"
-                                        await self.context.send_message(
-                                            target, MessageChain([Plain(message)])
-                                        )
+                                        send_message = getattr(self.context, "send_message", None)
+                                        if send_message is not None:
+                                            await send_message(
+                                                target, MessageChain([Plain(message)])
+                                            )
                                         logger.info("麦克风触发消息已发送")
 
                                 # 更新上次触发时间
@@ -2754,9 +2772,11 @@ class ScreenCompanion(Star):
 
                                         if text_content:
                                             message = f"【定时提醒】\n{text_content}"
-                                            await self.context.send_message(
-                                                target, MessageChain([Plain(message)])
-                                            )
+                                            send_message = getattr(self.context, "send_message", None)
+                                            if send_message is not None:
+                                                await send_message(
+                                                    target, MessageChain([Plain(message)])
+                                                )
                                             logger.info("自定义任务消息已发送")
                                 finally:
                                     # 任务完成后，清理临时任务
@@ -3084,6 +3104,7 @@ class ScreenCompanion(Star):
 
                         # 自动分段发送，参考 splitter 插件实现
                         if target:
+                            send_message = getattr(self.context, "send_message", None)
                             if text_content:
                                 segments = self._split_message(text_content)
                                 logger.info(
@@ -3094,8 +3115,8 @@ class ScreenCompanion(Star):
                                         if not self.is_running:
                                             break
                                         segment = segments[i]
-                                        if segment.strip():
-                                            await self.context.send_message(
+                                        if segment.strip() and send_message is not None:
+                                            await send_message(
                                                 target,
                                                 MessageChain([Plain(segment)]),
                                             )
@@ -3103,20 +3124,21 @@ class ScreenCompanion(Star):
                                     if (
                                         self.is_running
                                         and segments[-1].strip()
+                                        and send_message is not None
                                     ):
-                                        await self.context.send_message(
+                                        await send_message(
                                             target,
                                             MessageChain([Plain(segments[-1])]),
                                         )
                                 else:
-                                    if self.is_running:
-                                        await self.context.send_message(
+                                    if self.is_running and send_message is not None:
+                                        await send_message(
                                             target,
                                             MessageChain([Plain(text_content)]),
                                         )
                             else:
-                                if self.is_running:
-                                    await self.context.send_message(
+                                if self.is_running and send_message is not None:
+                                    await send_message(
                                         target, chain
                                     )
                         elif text_content:
