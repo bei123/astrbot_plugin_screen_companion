@@ -6,12 +6,15 @@
 **版本：2.1.0**
 **GitHub 仓库：** [https://github.com/menglimi/astrbot_plugin_screen_companion](https://github.com/menglimi/astrbot_plugin_screen_companion)
 
+## 后续计划
+- Webui发开中
 ---
 
 ## 支持的环境（只推荐本地部署）
 - Windows 桌面环境：需要授予屏幕录制权限
 - macOS 桌面环境：需要授予屏幕录制权限
 - 带桌面的Linux环境：需要图形界面支持
+- 
 
 ## 安装步骤
 1. **克隆仓库**：
