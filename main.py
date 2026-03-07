@@ -240,6 +240,7 @@ class ScreenCompanion(Star):
         self.webui_auth_enabled = self.plugin_config.webui.auth_enabled
         self.webui_password = self.plugin_config.webui.password
         self.webui_session_timeout = self.plugin_config.webui.session_timeout
+        self.webui_allow_external_api = self.plugin_config.webui.allow_external_api
 
     def _parse_custom_presets(self) -> list:
         """解析自定义预设配置。"""
@@ -2137,18 +2138,12 @@ class ScreenCompanion(Star):
         """管理自动观察屏幕任务"""
         pass
 
-    @filter.command("kpi")
-    async def kpi_preset_switch(self, event: AstrMessageEvent, preset_index: int = None):
-        """切换预设 /kpi [预设序号]"""
+    @kpi_group.command("ys")
+    async def kpi_ys(self, event: AstrMessageEvent, preset_index: int = None):
+        """切换预设 /kpi ys [预设序号]"""
         if preset_index is None:
             async for result in self.kpi_presets(event):
                 yield result
-            return
-        
-        try:
-            preset_index = int(preset_index)
-        except ValueError:
-            yield event.plain_result("预设序号必须是数字。")
             return
         
         if preset_index < 0:
@@ -2168,13 +2163,10 @@ class ScreenCompanion(Star):
         self.current_preset_index = preset_index
         self.plugin_config.current_preset_index = preset_index
         
-        if preset_index < len(self.parsed_custom_presets):
-            preset = self.parsed_custom_presets[preset_index]
-            yield event.plain_result(
-                f"✅ 已切换到预设{preset_index}：{preset['name']}，{preset['check_interval']}秒间隔，{preset['trigger_probability']}%触发概率"
-            )
-        else:
-            yield event.plain_result(f"预设{preset_index}不存在。")
+        preset = self.parsed_custom_presets[preset_index]
+        yield event.plain_result(
+            f"✅ 已切换到预设{preset_index}：{preset['name']}，{preset['check_interval']}秒间隔，{preset['trigger_probability']}%触发概率"
+        )
 
     @kpi_group.command("start")
     async def kpi_start(self, event: AstrMessageEvent):

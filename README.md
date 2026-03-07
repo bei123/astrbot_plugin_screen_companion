@@ -3,7 +3,7 @@
 ## 插件简介
 `astrbot_plugin_screen_companion` 是一款智能屏幕观察插件，通过截图分析和环境感知，为用户提供个性化的互动体验。它不仅能观察用户的屏幕活动，还能感知环境变化，如系统状态、天气情况和节假日，甚至能监听麦克风音量，为用户提供全方位的智能陪伴。
 
-**版本：2.2.0**
+**版本：2.3.0**
 **GitHub 仓库：** [https://github.com/menglimi/astrbot_plugin_screen_companion](https://github.com/menglimi/astrbot_plugin_screen_companion)
 
 ---
@@ -63,6 +63,7 @@
 - **自定义监控任务**：在配置文件中设置特定时间的监控任务，如凌晨2点提醒休息
 - **麦克风监听**：监听麦克风音量，当音量超过阈值时触发截屏回复
 - **用户行为学习**：根据用户的反馈和行为模式调整互动方式
+- **外部API**：支持外部系统调用API分析图片
 
 ---
 
@@ -71,13 +72,13 @@
 | :--- | :--- | :--- | :--- |
 | `/kp` | 无 | 立即截取当前屏幕并让机器人进行点评 | `/kp` |
 | `/kps` | 无 | 切换自动监控的状态（开启/关闭） | `/kps` |
-| `/kpi` | [预设序号] | 查看预设列表或切换预设 | `/kpi` 或 `/kpi 0` |
+| `/kpi y` | [预设序号] [间隔秒数] [触发概率] | 添加或修改自定义预设 | `/kpi y 1 90 30` |
+| `/kpi ys` | [预设序号] | 切换到指定预设 | `/kpi ys 0` |
+| `/kpi presets` | 无 | 列出所有自定义预设 | `/kpi presets` |
+| `/kpi p` | 无 | 列出所有自定义预设（简化版） | `/kpi p` |
 | `/kpi start` | 无 | 启动自动监控任务 | `/kpi start` |
 | `/kpi stop` | 无 | 停止所有自动监控任务 | `/kpi stop` |
 | `/kpi list` | 无 | 列出所有运行中的自动监控任务 | `/kpi list` |
-| `/kpi y` | [预设序号] [间隔秒数] [触发概率] | 添加或修改自定义预设 | `/kpi y 1 90 30` |
-| `/kpi presets` | 无 | 列出所有自定义预设 | `/kpi presets` |
-| `/kpi p` | 无 | 列出所有自定义预设（简化版） | `/kpi p` |
 | `/kpi add` | [间隔秒数] [自定义提示词] | 添加自定义自动监控任务 | `/kpi add 60 请专注于工作` |
 | `/kpi diary` | [YYYY-MM-DD] | 查看特定日期的日记，不提供日期则查看今天的日记 | `/kpi diary 2026-03-03` |
 | `/kpi d` | [YYYYMMDD] | 查看特定日期的日记（简化版），支持 YYYYMMDD 格式 | `/kpi d 20260305` |
@@ -109,10 +110,10 @@
 /kpi y 1 30 50
 
 # 切换到预设0
-/kpi 0
+/kpi ys 0
 
 # 切换回手动配置模式
-/kpi -1
+/kpi ys -1
 ```
 
 ### 预设与手动配置
@@ -138,10 +139,103 @@
 - **麦克风监听**：启用麦克风监听、音量阈值、检查间隔
 - **用户偏好设置**：设置不同场景的互动风格、启用用户行为学习
 - **消息与通知**：管理员QQ号、主动消息推送目标
+- **Web UI**：Web界面开关、端口、认证、允许外部API调用
+
+---
+
+## 外部API调用说明
+
+### 启用外部API
+
+1. 在配置中找到 `Web UI` -> `允许外部API调用`，设置为开启
+2. 设置 `Web UI 密码`（用于API认证）
+3. 启动Web UI：`/kpi webui start`
+
+### API接口
+
+#### 1. 文件上传方式
+
+**端点**: `POST /api/analyze`
+
+**参数**:
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| image | File | 是 | 图片文件 |
+| prompt | String | 否 | 自定义提示词 |
+| webhook | String | 否 | 回调地址 |
+
+**调用示例**:
+```bash
+curl -X POST "http://localhost:8898/api/analyze" \
+  -F "image=@screenshot.jpg" \
+  -H "X-API-Key: your_password"
+```
+
+#### 2. Base64方式
+
+**端点**: `POST /api/analyze/base64`
+
+**请求体**:
+```json
+{
+  "image": "base64编码的图片",
+  "prompt": "自定义提示词(可选)",
+  "webhook": "回调地址(可选)"
+}
+```
+
+**调用示例**:
+```bash
+curl -X POST "http://localhost:8898/api/analyze/base64" \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_password" \
+  -d '{"image": "data:image/jpeg;base64,/9j/4AAQSkZJRg..."}'
+```
+
+### 返回格式
+
+**成功**:
+```json
+{
+  "success": true,
+  "recognition": "用户正在使用VSCode编写Python代码...",
+  "scene": "编程",
+  "reply": "哇，在写代码呢~好厉害的样子！"
+}
+```
+
+**失败**:
+```json
+{
+  "success": false,
+  "error": "未配置视觉API",
+  "reply": "……好像忘了看什么了……"
+}
+```
+
+### Webhook回调
+
+当提供 `webhook` 参数时，分析完成后会自动 POST 结果到指定地址：
+```json
+{
+  "success": true,
+  "recognition": "...",
+  "scene": "...",
+  "reply": "..."
+}
+```
 
 ---
 
 ## 版本更新
+
+### 2.3.0 (2026-03-07)
+- **外部图片分析API**：支持外部系统调用API分析图片
+  - `/api/analyze` - 文件上传方式
+  - `/api/analyze/base64` - Base64方式
+  - 支持自定义提示词和Webhook回调
+  - 需要在配置中启用并设置密码
+- **错误提示优化**：将技术性错误信息改为更符合角色的模糊回复
 
 ### 2.2.0 (2026-03-07)
 - **自定义预设系统**：用户可以通过指令配置多个自定义互动预设

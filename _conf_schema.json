@@ -488,6 +488,12 @@
         "type": "int",
         "hint": "Web UI 会话的超时时间（秒）",
         "default": 3600
+      },
+      "allow_external_api": {
+        "description": "允许外部API调用",
+        "type": "bool",
+        "hint": "允许外部系统调用API分析图片，调用需要提供密码认证",
+        "default": false
       }
     }
   }

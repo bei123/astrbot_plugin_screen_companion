@@ -118,11 +118,28 @@ class WebServer:
             if request.method == "OPTIONS":
                 return await handler(request)
 
+            path = request.path or "/"
+            
+            # 检查是否是外部API调用
+            if path in ("/api/analyze", "/api/analyze/base64"):
+                # 外部API需要特殊处理
+                if not self.plugin.webui_allow_external_api:
+                    return WebServer._err("外部API未启用", 403)
+                
+                # 检查API密钥
+                expected = self._get_expected_secret()
+                if expected:
+                    # 从Header获取API密钥
+                    api_key = request.headers.get("X-API-Key", "")
+                    if not api_key or api_key != expected:
+                        return WebServer._err("Unauthorized", 401)
+                return await handler(request)
+            
+            # 其他API需要登录
             expected = self._get_expected_secret()
             if not expected:
                 return await handler(request)
 
-            path = request.path or "/"
             if (
                 path in ("/", "/index.html")
                 or path.startswith("/web")
@@ -170,6 +187,12 @@ class WebServer:
         self.app.router.add_get("/api/memories", self.handle_list_memories)
         self.app.router.add_get("/api/config", self.handle_get_config)
         self.app.router.add_get("/api/health", self.handle_health_check)
+        
+        # 外部图片分析API
+        self.app.router.add_post("/api/analyze", self.handle_analyze_image)
+        self.app.router.add_post("/api/analyze/base64", self.handle_analyze_image_base64)
+        
+        # 认证相关
         self.app.router.add_get("/auth/info", self.handle_auth_info)
         self.app.router.add_post("/auth/login", self.handle_auth_login)
         self.app.router.add_post("/auth/logout", self.handle_auth_logout)
@@ -450,7 +473,7 @@ class WebServer:
         try:
             return self._ok({
                 "version": "1.0.0",
-                "plugin_version": "2.2.0"
+                "plugin_version": "2.3.0"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -459,6 +482,151 @@ class WebServer:
     async def handle_health_check(self, request):
         """健康检查"""
         return self._ok({"status": "ok", "service": "screen-companion-webui"})
+
+    async def handle_analyze_image(self, request):
+        """通过文件上传分析图片"""
+        try:
+            reader = await request.multipart()
+            
+            image_bytes = None
+            custom_prompt = None
+            webhook_url = None
+            
+            async for field in reader:
+                if field.name == "image":
+                    image_bytes = await field.read()
+                elif field.name == "prompt":
+                    custom_prompt = await field.text()
+                elif field.name == "webhook":
+                    webhook_url = await field.text()
+            
+            if not image_bytes:
+                return self._err("未上传图片", 400)
+            
+            # 调用插件的分析方法
+            result = await self._analyze_image_logic(image_bytes, custom_prompt)
+            
+            # 如果提供了webhook，发送结果
+            if webhook_url and result.get("success"):
+                asyncio.create_task(self._send_webhook(webhook_url, result))
+            
+            return self._ok(result)
+            
+        except Exception as e:
+            logger.error(f"图片分析失败: {e}")
+            return self._err(str(e))
+
+    async def handle_analyze_image_base64(self, request):
+        """通过Base64分析图片"""
+        try:
+            payload = await request.json()
+            
+            image_base64 = payload.get("image", "")
+            custom_prompt = payload.get("prompt", "")
+            webhook_url = payload.get("webhook", "")
+            
+            if not image_base64:
+                return self._err("未提供图片 Base64", 400)
+            
+            # 解码Base64
+            import base64
+            try:
+                if image_base64.startswith("data:"):
+                    # 去除 data:image/xxx;base64, 前缀
+                    image_base64 = image_base64.split(",", 1)[1]
+                image_bytes = base64.b64decode(image_base64)
+            except Exception:
+                return self._err("Base64 解码失败", 400)
+            
+            # 调用插件的分析方法
+            result = await self._analyze_image_logic(image_bytes, custom_prompt)
+            
+            # 如果提供了webhook，发送结果
+            if webhook_url and result.get("success"):
+                asyncio.create_task(self._send_webhook(webhook_url, result))
+            
+            return self._ok(result)
+            
+        except Exception as e:
+            logger.error(f"图片分析失败: {e}")
+            return self._err(str(e))
+
+    async def _analyze_image_logic(self, image_bytes: bytes, custom_prompt: str = None) -> dict:
+        """图片分析逻辑"""
+        try:
+            # 检查是否有视觉API配置
+            if not self.plugin.vision_api_url:
+                return {
+                    "success": False,
+                    "error": "未配置视觉API",
+                    "reply": "……好像忘了看什么了……"
+                }
+            
+            # 调用视觉API识别
+            recognition_text = await self.plugin._call_external_vision_api(image_bytes)
+            
+            # 检查识别是否成功
+            if "错误" in recognition_text or "无法" in recognition_text:
+                return {
+                    "success": False,
+                    "error": recognition_text,
+                    "reply": "……头晕晕的，看不太清……"
+                }
+            
+            # 构建回复
+            scene = self.plugin._identify_scene("外部图片")
+            interaction_prompt = f"用户的屏幕显示：{recognition_text}。"
+            if custom_prompt:
+                interaction_prompt += f" {custom_prompt}"
+            
+            # 获取system prompt
+            system_prompt = await self.plugin._get_persona_prompt()
+            
+            # 调用LLM生成回复
+            provider = self.plugin.context.get_using_provider()
+            if provider:
+                try:
+                    response = await asyncio.wait_for(
+                        provider.text_chat(prompt=interaction_prompt, system_prompt=system_prompt),
+                        timeout=60.0
+                    )
+                    reply_text = ""
+                    if response and hasattr(response, "completion_text") and response.completion_text:
+                        reply_text = response.completion_text
+                    else:
+                        reply_text = "……刚才看到什么了？"
+                except asyncio.TimeoutError:
+                    reply_text = "……刚才好像走神了，再来一次？"
+                except Exception as e:
+                    logger.error(f"LLM调用失败: {e}")
+                    reply_text = "……刚才有点困了，再试一次？"
+            else:
+                reply_text = "……好像忘了看什么了……"
+            
+            return {
+                "success": True,
+                "recognition": recognition_text,
+                "scene": scene,
+                "reply": reply_text
+            }
+            
+        except Exception as e:
+            logger.error(f"图片分析逻辑失败: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "reply": "……刚才晕了一下，再来？"
+            }
+
+    async def _send_webhook(self, url: str, result: dict):
+        """发送webhook回调"""
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=result, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    logger.info(f"Webhook发送成功: {url}")
+        except Exception as e:
+            logger.error(f"Webhook发送失败: {e}")
 
     async def handle_auth_info(self, request):
         """获取认证信息"""
