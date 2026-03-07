@@ -2,3 +2,6 @@ pyautogui
 Pillow
 pyaudio
 numpy
+pygetwindow
+aiohttp
+psutil

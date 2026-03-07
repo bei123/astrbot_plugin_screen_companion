@@ -27,12 +27,17 @@ class ScreenCompanion(Star):
 
         super().__init__(context)
         self.config = config
-        self.bot_name = config.get("bot_name", "诺星缘")
+        self.bot_name = config.get("bot_name", "屏幕助手")
         self.auto_tasks = {}
         self.is_running = False
         self.task_counter = 0
         self.running = True
         self.background_tasks = []
+        # 状态管理
+        self.state = "inactive"  # active, inactive, temporary
+        self.temporary_tasks = {}
+        # 固定自动化任务ID
+        self.AUTO_TASK_ID = "task_0"
 
         # 日记功能相关
         self.enable_diary = config.get("enable_diary", False)
@@ -43,7 +48,7 @@ class ScreenCompanion(Star):
         self.diary_recall_time = config.get("diary_recall_time", 30)
         self.diary_response_prompt = config.get(
             "diary_response_prompt",
-            "你发现用户居然偷看了你写的用户观察日记，给予相应回应。",
+            "你发现用户居然偷看了你写的用户观察日记，给予简单的回应，保持在一句话之内完成。",
         )
         self.diary_entries = []
         self.last_diary_date = None
@@ -172,13 +177,47 @@ class ScreenCompanion(Star):
         logger.info("停止屏幕伴侣插件，清理所有任务")
         # 停止所有自动任务
         self.is_running = False
-        for task_id, task in self.auto_tasks.items():
+        self.state = "inactive"
+        
+        # 清理自动任务
+        tasks_to_cancel = list(self.auto_tasks.items())
+        for task_id, task in tasks_to_cancel:
+            logger.info(f"取消任务 {task_id}")
             task.cancel()
+
+        for task_id, task in tasks_to_cancel:
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"等待任务 {task_id} 停止超时")
+            except asyncio.CancelledError:
+                logger.info(f"任务 {task_id} 已取消")
+            except Exception as e:
+                logger.error(f"等待任务 {task_id} 停止时出错: {e}")
+
         self.auto_tasks.clear()
         logger.info("所有自动任务已停止")
+        
+        # 清理临时任务
+        temp_tasks_to_cancel = list(self.temporary_tasks.items())
+        for task_id, task in temp_tasks_to_cancel:
+            logger.info(f"取消临时任务 {task_id}")
+            task.cancel()
 
-        # 停止其他后台任务
-        self.running = False
+        for task_id, task in temp_tasks_to_cancel:
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(f"等待临时任务 {task_id} 停止超时")
+            except asyncio.CancelledError:
+                logger.info(f"临时任务 {task_id} 已取消")
+            except Exception as e:
+                logger.error(f"等待临时任务 {task_id} 停止时出错: {e}")
+
+        self.temporary_tasks.clear()
+        logger.info("所有临时任务已停止")
+
+        # 停止麦克风监听任务，但保留日记和自定义任务
         self.enable_mic_monitor = False
 
         # 关闭远程截图服务
@@ -195,9 +234,29 @@ class ScreenCompanion(Star):
 
         # 取消所有后台任务
         for task in self.background_tasks:
+            logger.info("取消后台任务")
             task.cancel()
+
+        for task in self.background_tasks:
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("等待后台任务停止超时")
+            except asyncio.CancelledError:
+                logger.info("后台任务已取消")
+            except Exception as e:
+                logger.error(f"等待后台任务停止时出错: {e}")
+
         self.background_tasks.clear()
         logger.info("所有后台任务已停止")
+        
+        # 重新启动日记和自定义任务
+        self.running = True
+        task = asyncio.create_task(self._diary_task())
+        self.background_tasks.append(task)
+        task = asyncio.create_task(self._custom_tasks_task())
+        self.background_tasks.append(task)
+        logger.info("已重新启动日记和自定义任务")
 
     def _check_dependencies(self, check_mic=False):
         """检查并尝试导入必要库，避免在初始化时因缺少库导致整个插件加载失败。远程截图模式下不要求本机截屏相关库。"""
@@ -279,6 +338,183 @@ class ScreenCompanion(Star):
             return True, ""
         except Exception as e:
             return False, f"环境检查异常: {str(e)}"
+
+    async def _get_persona_prompt(self, umo: str = None) -> str:
+        """获取框架人格的系统提示词"""
+        try:
+            if hasattr(self.context, "persona_manager"):
+                persona = await self.context.persona_manager.get_default_persona_v3(
+                    umo=umo
+                )
+                if persona and "prompt" in persona:
+                    return persona["prompt"]
+        except Exception as e:
+            logger.debug(f"获取框架人格失败: {e}")
+        
+        config_prompt = self.config.get("system_prompt", "")
+        if config_prompt:
+            return config_prompt
+        return DEFAULT_SYSTEM_PROMPT
+
+    async def _get_start_response(self) -> str:
+        """获取开始监控的回复"""
+        mode = self.config.get("start_end_mode", "llm")
+        if mode == "preset":
+            return self.config.get("start_preset", "知道啦~我会时不时过来看一眼的")
+        else:
+            provider = self.context.get_using_provider()
+            if provider:
+                try:
+                    system_prompt = await self._get_persona_prompt()
+                    prompt = self.config.get(
+                        "start_llm_prompt",
+                        "以你的性格向用户表达你会开始偶尔地偷看用户的屏幕了，尽可能简短，保持在一句话内。"
+                    )
+                    response = await asyncio.wait_for(
+                        provider.text_chat(prompt=prompt, system_prompt=system_prompt),
+                        timeout=60.0
+                    )
+                    if response and hasattr(response, "completion_text") and response.completion_text:
+                        return response.completion_text
+                except asyncio.TimeoutError:
+                    logger.warning("LLM 生成开始回复超时，使用默认回复")
+                except Exception as e:
+                    logger.warning(f"LLM 生成开始回复失败: {e}，使用默认回复")
+            return "知道啦~我会时不时过来看一眼的"
+
+    async def _get_end_response(self) -> str:
+        """获取结束监控的回复"""
+        mode = self.config.get("start_end_mode", "llm")
+        if mode == "preset":
+            return self.config.get("end_preset", "好啦，我不看了～下次再陪你玩！")
+        else:
+            provider = self.context.get_using_provider()
+            if provider:
+                try:
+                    system_prompt = await self._get_persona_prompt()
+                    prompt = self.config.get(
+                        "end_llm_prompt",
+                        "你以你的性格向用户表达你停止看用户的屏幕了，尽可能简短，保持在一句话内。"
+                    )
+                    response = await asyncio.wait_for(
+                        provider.text_chat(prompt=prompt, system_prompt=system_prompt),
+                        timeout=60.0
+                    )
+                    if response and hasattr(response, "completion_text") and response.completion_text:
+                        return response.completion_text
+                except asyncio.TimeoutError:
+                    logger.warning("LLM 生成结束回复超时，使用默认回复")
+                except Exception as e:
+                    logger.warning(f"LLM 生成结束回复失败: {e}，使用默认回复")
+            return "好啦，我不看了～下次再陪你玩！"
+
+    def _generate_diary_image(self, diary_message: str) -> str:
+        """生成日记图片，返回临时文件路径"""
+        from PIL import Image, ImageDraw, ImageFont
+        import tempfile
+
+        font_size = 20
+        line_height = int(font_size * 1.8)
+        padding = 50
+        max_width = 800
+
+        chinese_fonts = [
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/msyhbd.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+            "C:/Windows/Fonts/simsun.ttc",
+            "C:/Windows/Fonts/STZHONGS.TTF",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        ]
+
+        font = None
+        for font_path in chinese_fonts:
+            try:
+                font = ImageFont.truetype(font_path, font_size)
+                test_draw = ImageDraw.Draw(Image.new('RGB', (100, 100)))
+                test_draw.text((0, 0), "测试中文", font=font)
+                break
+            except Exception:
+                continue
+
+        if font is None:
+            try:
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+
+        def get_text_width(text):
+            if font:
+                return font.getlength(text)
+            return len(text) * font_size
+
+        lines = []
+        max_text_width = max_width - padding * 2
+        title_count = 0  # 统计标题行数
+        
+        for paragraph in diary_message.split('\n'):
+            if not paragraph:
+                lines.append('')
+                continue
+
+            current_line = ""
+            for char in paragraph:
+                test_line = current_line + char
+                if get_text_width(test_line) <= max_text_width:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = char
+            if current_line:
+                lines.append(current_line)
+                # 检查是否是标题行
+                if current_line.startswith('【') and '日记' in current_line:
+                    title_count += 1
+
+        # 计算总高度，为标题行增加额外空间
+        title_extra_height = title_count * 4  # 每个标题额外增加4像素
+        total_height = padding * 2 + len(lines) * line_height + title_extra_height + 20
+        total_height = max(300, total_height)  # 增加最小高度
+
+        image = Image.new('RGB', (max_width, total_height), color=(255, 253, 245))
+        draw = ImageDraw.Draw(image)
+
+        draw.rectangle(
+            [(padding - 10, padding - 10), (max_width - padding + 10, total_height - padding + 10)],
+            outline=(200, 180, 160),
+            width=2
+        )
+
+        y = padding
+        for line in lines:
+            if line.startswith('【') and '日记' in line:
+                title_font = None
+                for font_path in chinese_fonts:
+                    try:
+                        title_font = ImageFont.truetype(font_path, font_size + 4)
+                        break
+                    except Exception:
+                        continue
+                if title_font is None:
+                    title_font = font
+                draw.text((padding, y), line, fill=(139, 69, 19), font=title_font)
+                y += line_height + 4  # 标题行使用更大的行高
+            elif line and line[0].isdigit() and '年' in line:
+                draw.text((padding, y), line, fill=(100, 100, 100), font=font)
+                y += line_height
+            else:
+                draw.text((padding, y), line, fill=(60, 60, 60), font=font)
+                y += line_height
+
+        temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        image.save(temp_file, format="PNG")
+        temp_file.close()
+
+        return temp_file.name
 
     async def _capture_screen_bytes(self):
         """执行截图并返回字节流和活动窗口标题。本地为 pyautogui；远程为接收 Windows 端推送的截图。"""
@@ -554,8 +790,9 @@ class ScreenCompanion(Star):
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
 
-            # 发送请求
-            async with aiohttp.ClientSession() as session:
+            # 发送请求 - 添加超时设置
+            timeout = aiohttp.ClientTimeout(total=120.0)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     api_url, json=payload, headers=headers
                 ) as response:
@@ -966,10 +1203,12 @@ class ScreenCompanion(Star):
             logger.debug("未检测到已启用的 LLM 提供商")
             return [Plain("未检测到已启用的 LLM 提供商，无法进行视觉分析。")]
 
-        # 优先使用配置中的系统提示词，否则通过人格设定管理器获取默认人格（umo 须为合法 session 格式，否则框架解析会报错）
-        umo = self._safe_umo(getattr(session, "unified_msg_origin", None) or "")
-        system_prompt = self.config.get("system_prompt") or self._get_default_system_prompt(umo)
-        logger.info(f"[任务 {task_id}] 使用诺星缘人格设定")
+        umo = None
+        if session and hasattr(session, "unified_msg_origin"):
+            umo = session.unified_msg_origin
+
+        system_prompt = await self._get_persona_prompt(umo)
+        logger.info(f"[任务 {task_id}] 使用人格设定")
 
         debug_mode = self.config.get("debug", False)
 
@@ -1103,7 +1342,10 @@ class ScreenCompanion(Star):
                     interaction_prompt += f" {weather_prompt}"
                 if system_status_prompt:
                     interaction_prompt += f" {system_status_prompt}"
-            interaction_prompt += " 请以诺星缘的身份，直接给出你的评论或互动，不要添加任何引言或开场白。要具体提及屏幕上的内容，针对用户正在进行的操作提供相关的互动。保持口语化的表达方式，简短自然，符合女高中生的说话风格。绝对不要使用括号描述动作或表情，直接通过语言表达你的意思。最多输出三句话，最好在两句话内完成回复。"
+            if scene == "视频" or scene == "阅读":
+                interaction_prompt += f" 请对屏幕内容进行深度分析和思考，对剧情发展、人物关系或主题意义进行猜想和分析。可以提出创意性的见解，预测未来可能的发展方向，或者探讨内容背后的深层含义。最多输出四句话，最好在三句话内完成回复。"
+            else:
+                interaction_prompt += f" 请直接给出你的评论或互动，不要添加任何引言或开场白。要具体提及屏幕上的内容，针对用户正在进行的操作提供相关的互动。最多输出三句话，最好在两句话内完成回复。"
 
             # 如果有对话历史，添加到提示词中
             if contexts:
@@ -1294,38 +1536,34 @@ class ScreenCompanion(Star):
     @filter.command("kps")
     async def kps(self, event: AstrMessageEvent):
         """切换自动观察任务状态"""
-        # 切换状态
-        if self.is_running:
-            # 停止所有任务
+        if self.state == "active":
+            # 从活动状态切换到非活动状态
+            self.state = "inactive"
             self.is_running = False
             logger.info("正在停止所有自动观察任务...")
 
-            # 取消所有任务
-            for task_id, task in self.auto_tasks.items():
+            # 停止所有自动任务
+            tasks_to_cancel = list(self.auto_tasks.items())
+            for task_id, task in tasks_to_cancel:
                 logger.info(f"取消任务 {task_id}")
                 task.cancel()
 
-            # 等待任务完全停止
-            if self.auto_tasks:
+            for task_id, task in tasks_to_cancel:
                 try:
-                    await asyncio.wait_for(
-                        asyncio.gather(
-                            *[task for task in self.auto_tasks.values()],
-                            return_exceptions=True,
-                        ),
-                        timeout=5.0,
-                    )
+                    await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.TimeoutError:
-                    logger.warning("等待任务停止超时")
+                    logger.warning(f"等待任务 {task_id} 停止超时")
+                except asyncio.CancelledError:
+                    logger.info(f"任务 {task_id} 已取消")
                 except Exception as e:
-                    logger.error(f"等待任务停止时出错: {e}")
+                    logger.error(f"等待任务 {task_id} 停止时出错: {e}")
 
             self.auto_tasks.clear()
             logger.info("所有自动观察任务已停止")
-            yield event.plain_result("哼，不看就不看~")
+            end_response = await self._get_end_response()
+            yield event.plain_result(end_response)
         else:
-            # 启动默认任务
-            # 检查enabled配置
+            # 从非活动状态切换到活动状态
             if not self.config.get("enabled", False):
                 yield event.plain_result(
                     "自动截图互动功能未在配置中启用，请先在配置文件中开启该选项。"
@@ -1337,14 +1575,19 @@ class ScreenCompanion(Star):
                 yield event.plain_result(f"启动失败：\n{err_msg}")
                 return
 
+            # 检查是否已有自动化任务
+            if self.AUTO_TASK_ID in self.auto_tasks:
+                logger.info("自动化任务已存在，无需重复启动")
+                return
+
+            self.state = "active"
             self.is_running = True
-            task_id = f"task_{self.task_counter}"
-            self.task_counter += 1
-            logger.info(f"启动任务 {task_id}")
-            self.auto_tasks[task_id] = asyncio.create_task(
-                self._auto_screen_task(event, task_id=task_id)
+            logger.info(f"启动任务 {self.AUTO_TASK_ID}")
+            self.auto_tasks[self.AUTO_TASK_ID] = asyncio.create_task(
+                self._auto_screen_task(event, task_id=self.AUTO_TASK_ID)
             )
-            yield event.plain_result("知道啦，我会时不时过来瞄一眼的~")
+            start_response = await self._get_start_response()
+            yield event.plain_result(start_response)
 
     @filter.command_group("kpi")
     def kpi_group(self):
@@ -1354,39 +1597,41 @@ class ScreenCompanion(Star):
     @kpi_group.command("start")
     async def kpi_start(self, event: AstrMessageEvent):
         """启动自动观察任务"""
-        # 检查enabled配置
         if not self.config.get("enabled", False):
             yield event.plain_result(
                 "自动截图互动功能未在配置中启用，请先在配置文件中开启该选项。"
             )
             return
 
-        # 检查环境
         ok, err_msg = self._check_env(check_mic=False)
         if not ok:
             yield event.plain_result(f"启动失败：\n{err_msg}")
             return
 
-        if not self.is_running:
-            self.is_running = True
-        task_id = f"task_{self.task_counter}"
-        self.task_counter += 1
-        self.auto_tasks[task_id] = asyncio.create_task(
-            self._auto_screen_task(event, task_id=task_id)
+        # 检查是否已有自动化任务
+        if self.AUTO_TASK_ID in self.auto_tasks:
+            logger.info("自动化任务已存在，无需重复启动")
+            return
+
+        # 设置为活动状态
+        self.state = "active"
+        self.is_running = True
+        logger.info(f"启动任务 {self.AUTO_TASK_ID}")
+        self.auto_tasks[self.AUTO_TASK_ID] = asyncio.create_task(
+            self._auto_screen_task(event, task_id=self.AUTO_TASK_ID)
         )
-        yield event.plain_result(f"✅ 已启动任务 {task_id}，我会时不时过来瞄一眼的~")
+        start_response = await self._get_start_response()
+        yield event.plain_result(f"✅ 已启动任务 {self.AUTO_TASK_ID}，{start_response}")
 
     @kpi_group.command("stop")
     async def kpi_stop(self, event: AstrMessageEvent, task_id: str | None = None):
         """停止自动观察任务"""
         if task_id:
-            # 停止指定任务
             if task_id in self.auto_tasks:
                 logger.info(f"取消任务 {task_id}")
                 task = self.auto_tasks[task_id]
                 task.cancel()
 
-                # 等待任务停止
                 try:
                     await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.TimeoutError:
@@ -1397,40 +1642,39 @@ class ScreenCompanion(Star):
                     logger.error(f"等待任务 {task_id} 停止时出错: {e}")
 
                 del self.auto_tasks[task_id]
-                # 检查是否还有其他任务在运行
                 if not self.auto_tasks:
                     self.is_running = False
+                    # 所有任务停止，设置为非活动状态
+                    self.state = "inactive"
                 yield event.plain_result(f"已停止任务 {task_id}。")
             else:
                 yield event.plain_result(f"任务 {task_id} 不存在。")
         else:
-            # 停止所有任务
             logger.info("正在停止所有自动观察任务...")
             self.is_running = False
+            # 设置为非活动状态
+            self.state = "inactive"
 
-            # 取消所有任务
-            for task_id, task in self.auto_tasks.items():
+            # 停止所有自动任务（只停止自动化任务，不停止临时任务）
+            tasks_to_cancel = list(self.auto_tasks.items())
+            for task_id, task in tasks_to_cancel:
                 logger.info(f"取消任务 {task_id}")
                 task.cancel()
 
-            # 等待任务完全停止
-            if self.auto_tasks:
+            for task_id, task in tasks_to_cancel:
                 try:
-                    await asyncio.wait_for(
-                        asyncio.gather(
-                            *[task for task in self.auto_tasks.values()],
-                            return_exceptions=True,
-                        ),
-                        timeout=5.0,
-                    )
+                    await asyncio.wait_for(task, timeout=5.0)
                 except asyncio.TimeoutError:
-                    logger.warning("等待任务停止超时")
+                    logger.warning(f"等待任务 {task_id} 停止超时")
+                except asyncio.CancelledError:
+                    logger.info(f"任务 {task_id} 已取消")
                 except Exception as e:
-                    logger.error(f"等待任务停止时出错: {e}")
+                    logger.error(f"等待任务 {task_id} 停止时出错: {e}")
 
             self.auto_tasks.clear()
             logger.info("所有自动观察任务已停止")
-            yield event.plain_result("哼，不看就不看~")
+            end_response = await self._get_end_response()
+            yield event.plain_result(end_response)
 
     @kpi_group.command("list")
     async def kpi_list(self, event: AstrMessageEvent):
@@ -1536,8 +1780,34 @@ class ScreenCompanion(Star):
             else:
                 yield event.plain_result("喂！你怎么偷看人家的日记啦？真是的...")
 
-            # 发送日记内容
-            diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{diary_content[:1000]}"
+            # 尝试提取旧格式的总结部分
+            summary_start = diary_content.find(f"## {self.bot_name}的总结")
+            if summary_start == -1:
+                summary_start = diary_content.find("## 总结")
+            if summary_start != -1:
+                summary_content = diary_content[summary_start:]
+                # 提取总结文本，去除标题
+                summary_lines = summary_content.split('\n')
+                summary_text = '\n'.join(summary_lines[2:]).strip()
+                # 限制在500字以下
+                if len(summary_text) > 500:
+                    summary_text = summary_text[:497] + "..."
+                diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
+            else:
+                # 尝试从今日观察部分开始提取
+                observation_start = diary_content.find("## 今日观察")
+                if observation_start != -1:
+                    observation_content = diary_content[observation_start:]
+                    # 提取观察文本，去除标题
+                    observation_lines = observation_content.split('\n')
+                    observation_text = '\n'.join(observation_lines[2:]).strip()
+                    # 限制在500字以下
+                    if len(observation_text) > 500:
+                        observation_text = observation_text[:497] + "..."
+                    diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n{observation_text}"
+                else:
+                    # 如果没有任何结构化部分，使用空内容
+                    diary_message = f"【{self.bot_name}的日记】\n{target_date.strftime('%Y年%m月%d日')}\n\n今天没有记录。"
 
             # 检查是否需要自动撤回
             if self.diary_auto_recall:
@@ -1561,33 +1831,53 @@ class ScreenCompanion(Star):
             send_as_image = self.config.get("diary_send_as_image", False)
             if send_as_image:
                 try:
-                    from PIL import Image as PILImage, ImageDraw, ImageFont
-                    width, height = 800, 600
-                    image = PILImage.new("RGB", (width, height), color=(255, 255, 255))
-                    draw = ImageDraw.Draw(image)
-                    try:
-                        font = ImageFont.truetype("arial.ttf", 16)
-                    except Exception:
-                        font = ImageFont.load_default()
-                    text_lines = diary_message.split("\n")
-                    y = 50
-                    line_height = 25
-                    for line in text_lines:
-                        draw.text((50, y), line, fill=(0, 0, 0), font=font)
-                        y += line_height
-                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                    image.save(tmp, format="PNG")
-                    tmp.close()
-                    yield event.image_result(tmp.name)
-                    try:
-                        os.unlink(tmp.name)
-                    except Exception:
-                        pass
+                    temp_file_path = self._generate_diary_image(diary_message)
+                    yield event.image_result(temp_file_path)
+                    os.unlink(temp_file_path)
                 except Exception as e:
                     logger.error(f"生成日记图片失败: {e}")
                     yield event.plain_result(diary_message)
             else:
                 yield event.plain_result(diary_message)
+
+            # 同时生成日记被偷看的回应（异步进行）
+            async def generate_blame():
+                provider = self.context.get_using_provider()
+                if provider:
+                    try:
+                        system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
+                        response = await provider.text_chat(
+                            prompt=self.diary_response_prompt, system_prompt=system_prompt
+                        )
+                        if (
+                            response
+                            and hasattr(response, "completion_text")
+                            and response.completion_text
+                        ):
+                            await self.context.send_message(
+                                event.unified_msg_origin,
+                                MessageChain([Plain(response.completion_text)])
+                            )
+                        else:
+                            await self.context.send_message(
+                                event.unified_msg_origin,
+                                MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
+                            )
+                    except Exception as e:
+                        logger.error(f"生成日记被偷看回应失败: {e}")
+                        await self.context.send_message(
+                            event.unified_msg_origin,
+                            MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
+                        )
+                else:
+                    await self.context.send_message(
+                        event.unified_msg_origin,
+                        MessageChain([Plain("喂！你怎么偷看人家的日记啦？真是的...")])
+                    )
+
+            # 异步生成责备回应
+            blame_task = asyncio.create_task(generate_blame())
+            self.background_tasks.append(blame_task)
 
         except Exception as e:
             logger.error(f"读取日记失败: {e}")
@@ -1677,37 +1967,239 @@ class ScreenCompanion(Star):
         # 按日期从新到旧发送日记
         send_as_image = self.config.get("diary_send_as_image", False)
         for diary in found_diaries:
-            diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary['content'][:1000]}"
+            # 提取感想部分
+            summary_start = diary['content'].find("## 今日感想")
+            if summary_start != -1:
+                summary_content = diary['content'][summary_start:]
+                # 提取感想文本，去除标题
+                summary_lines = summary_content.split('\n')
+                summary_text = '\n'.join(summary_lines[2:]).strip()
+                # 限制在500字以下
+                if len(summary_text) > 500:
+                    summary_text = summary_text[:497] + "..."
+                diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
+            else:
+                # 尝试提取旧格式的总结部分
+                summary_start = diary['content'].find(f"## {self.bot_name}的总结")
+                if summary_start == -1:
+                    summary_start = diary['content'].find("## 总结")
+                if summary_start != -1:
+                    summary_content = diary['content'][summary_start:]
+                    # 提取总结文本，去除标题
+                    summary_lines = summary_content.split('\n')
+                    summary_text = '\n'.join(summary_lines[2:]).strip()
+                    # 限制在500字以下
+                    if len(summary_text) > 500:
+                        summary_text = summary_text[:497] + "..."
+                    diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                else:
+                    # 如果没有感想或总结部分，使用整个日记内容（限制500字）
+                    diary_text = diary['content'].replace(f'# {self.bot_name}的日记', '').replace(f'# {self.bot_name}的观察日记', '').replace(f'{diary["date"].strftime("%Y年%m月%d日")}', '').replace('## 今日观察', '').strip()
+                    if len(diary_text) > 500:
+                        diary_text = diary_text[:497] + "..."
+                    diary_message = f"【{self.bot_name}的日记】\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary_text}"
+
             if send_as_image:
                 try:
-                    from PIL import Image as PILImage, ImageDraw, ImageFont
-                    width, height = 800, 600
-                    image = PILImage.new("RGB", (width, height), color=(255, 255, 255))
-                    draw = ImageDraw.Draw(image)
-                    try:
-                        font = ImageFont.truetype("arial.ttf", 16)
-                    except Exception:
-                        font = ImageFont.load_default()
-                    text_lines = diary_message.split("\n")
-                    y = 50
-                    line_height = 25
-                    for line in text_lines:
-                        draw.text((50, y), line, fill=(0, 0, 0), font=font)
-                        y += line_height
-                    tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-                    image.save(tmp, format="PNG")
-                    tmp.close()
-                    yield event.image_result(tmp.name)
-                    try:
-                        os.unlink(tmp.name)
-                    except Exception:
-                        pass
+                    temp_file_path = self._generate_diary_image(diary_message)
+                    yield event.image_result(temp_file_path)
+                    os.unlink(temp_file_path)
                 except Exception as e:
                     logger.error(f"生成日记图片失败: {e}")
                     yield event.plain_result(diary_message)
             else:
                 yield event.plain_result(diary_message)
             await asyncio.sleep(0.5)  # 添加小延迟使发送更自然
+
+        # 同时生成日记被偷看的回应（异步进行）
+        async def generate_blame():
+            provider = self.context.get_using_provider()
+            if provider:
+                try:
+                    system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
+                    response = await provider.text_chat(
+                        prompt=self.diary_response_prompt, system_prompt=system_prompt
+                    )
+                    if (
+                        response
+                        and hasattr(response, "completion_text")
+                        and response.completion_text
+                    ):
+                        await self.context.send_message(
+                            event.unified_msg_origin,
+                            MessageChain([Plain(response.completion_text)])
+                        )
+                    else:
+                        await self.context.send_message(
+                            event.unified_msg_origin,
+                            MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
+                        )
+                except Exception as e:
+                    logger.error(f"生成日记被偷看回应失败: {e}")
+                    await self.context.send_message(
+                        event.unified_msg_origin,
+                        MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
+                    )
+            else:
+                await self.context.send_message(
+                    event.unified_msg_origin,
+                    MessageChain([Plain("喂！你怎么偷看人家这么多天的日记啦？真是的...")])
+                )
+
+        # 异步生成责备回应
+        blame_task = asyncio.create_task(generate_blame())
+        self.background_tasks.append(blame_task)
+
+    @kpi_group.command("debug")
+    async def kpi_debug(self, event: AstrMessageEvent, status: str = None):
+        """切换调试模式 /kpi debug [on/off]"""
+        if status is None:
+            # 显示当前状态
+            current_status = self.config.get("debug", False)
+            status_text = "开启" if current_status else "关闭"
+            yield event.plain_result(f"当前调试模式状态：{status_text}")
+            return
+        
+        status = status.lower()
+        if status == "on":
+            self.config["debug"] = True
+            yield event.plain_result("调试模式已开启，将显示详细日志")
+        elif status == "off":
+            self.config["debug"] = False
+            yield event.plain_result("调试模式已关闭，将隐藏大部分日志")
+        else:
+            yield event.plain_result("用法: /kpi debug [on/off]")
+
+    @kpi_group.command("complete")
+    async def kpi_complete(self, event: AstrMessageEvent, date: str = None):
+        """补写日记 /kpi complete [YYYY-MM-DD]"""
+        async for result in self._handle_complete_command(event, date):
+            yield result
+
+    @kpi_group.command("cd")
+    async def kpi_cd(self, event: AstrMessageEvent, date: str = None):
+        """补写日记（简化版） /kpi cd [YYYYMMDD]"""
+        async for result in self._handle_complete_command(event, date):
+            yield result
+
+    async def _handle_complete_command(self, event: AstrMessageEvent, date: str = None):
+        """处理日记补写命令"""
+        import datetime
+        import os
+
+        if not self.enable_diary:
+            yield event.plain_result("日记功能未启用，请在配置中开启。")
+            return
+
+        # 确定要补写的日期
+        if date:
+            try:
+                # 支持两种日期格式：YYYY-MM-DD 和 YYYYMMDD
+                date_str = str(date)
+                if len(date_str) == 8 and date_str.isdigit():
+                    target_date = datetime.datetime.strptime(date_str, "%Y%m%d").date()
+                else:
+                    target_date = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                yield event.plain_result(
+                    "日期格式错误，请使用 YYYY-MM-DD 或 YYYYMMDD 格式，例如：/kpi cd 20260302"
+                )
+                return
+        else:
+            target_date = datetime.date.today()
+
+        # 检查是否已有日记
+        diary_filename = f"diary_{target_date.strftime('%Y%m%d')}.md"
+        diary_path = os.path.join(self.diary_storage, diary_filename)
+
+        if os.path.exists(diary_path):
+            yield event.plain_result(
+                f"{target_date.strftime('%Y年%m月%d日')} 的日记已经存在，无需补写。"
+            )
+            return
+
+        # 生成补写日记
+        provider = self.context.get_using_provider()
+        if not provider:
+            yield event.plain_result("未检测到已启用的 LLM 提供商，无法生成日记。")
+            return
+
+        try:
+            system_prompt = await self._get_persona_prompt(event.unified_msg_origin)
+            completion_prompt = f"请根据你的性格和之前的日记风格，补写 {target_date.strftime('%Y年%m月%d日')} 的日记。请根据观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。不要只是对观察记录的生硬总结，而是要融合你的经历和情感，生成一个更个人化的日记。请字数控制在400字左右。"
+
+            # 参考前几天的日记
+            reference_days = []
+            for i in range(1, 3):  # 参考前2天
+                past_date = target_date - datetime.timedelta(days=i)
+                past_diary_filename = f"diary_{past_date.strftime('%Y%m%d')}.md"
+                past_diary_path = os.path.join(
+                    self.diary_storage, past_diary_filename
+                )
+                if os.path.exists(past_diary_path):
+                    try:
+                        with open(past_diary_path, encoding="utf-8") as f:
+                            past_diary_content = f.read()
+                        reference_days.append(
+                            {
+                                "date": past_date.strftime("%Y年%m月%d日"),
+                                "content": past_diary_content,
+                            }
+                        )
+                    except Exception as e:
+                        logger.error(f"读取前几天日记失败: {e}")
+
+            if reference_days:
+                completion_prompt += "\n\n参考前几天的日记：\n"
+                for day in reference_days:
+                    completion_prompt += f"### {day['date']}\n{day['content'][:500]}...\n\n"  # 只取前500字
+                completion_prompt += "\n请结合前几天的日记内容，保持日记风格的连贯性，补写出今天的日记。"
+
+            # 生成日记内容
+            response = await provider.text_chat(
+                prompt=completion_prompt, system_prompt=system_prompt
+            )
+
+            if (
+                response
+                and hasattr(response, "completion_text")
+                and response.completion_text
+            ):
+                # 获取星期
+                weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+                weekday = weekdays[target_date.weekday()]
+
+                # 尝试获取天气信息
+                weather_info = ""
+                try:
+                    weather_info = await self._get_weather_prompt()
+                except Exception as e:
+                    logger.debug(f"获取天气信息失败: {e}")
+
+                # 构建补写日记内容 - 符合标准日记格式
+                diary_content = f"# {self.bot_name}的日记\n\n"
+                diary_content += f"## {target_date.strftime('%Y年%m月%d日')} {weekday}\n\n"
+                if weather_info:
+                    diary_content += f"**天气**: {weather_info}\n\n"
+                diary_content += "## 今日观察\n\n"
+                diary_content += "（补写）今天的具体活动记录缺失\n\n"
+                diary_content += "## 今日感想\n\n"
+                diary_content += response.completion_text
+
+                # 保存日记文件
+                try:
+                    with open(diary_path, "w", encoding="utf-8") as f:
+                        f.write(diary_content)
+                    logger.info(f"补写日记已保存到: {diary_path}")
+                    yield event.plain_result(f"已成功补写 {target_date.strftime('%Y年%m月%d日')} 的日记。")
+                except Exception as e:
+                    logger.error(f"保存补写日记失败: {e}")
+                    yield event.plain_result("保存补写日记失败，请检查日志。")
+            else:
+                yield event.plain_result("生成日记内容失败，请检查日志。")
+        except Exception as e:
+            logger.error(f"补写日记失败: {e}")
+            yield event.plain_result("补写日记失败，请检查日志。")
 
     def _is_in_active_time_range(self):
         """检查当前时间是否在设定的活跃时间段内"""
@@ -1763,7 +2255,7 @@ class ScreenCompanion(Star):
         today = datetime.date.today()
 
         # 构建日记内容
-        diary_content = "# 诺星缘的观察日记\n\n"
+        diary_content = f"# {self.bot_name}的观察日记\n\n"
         diary_content += f"日期: {today.strftime('%Y年%m月%d日')}\n\n"
 
         # 添加观察记录
@@ -1775,43 +2267,42 @@ class ScreenCompanion(Star):
         # 生成风格化的总结
         provider = getattr(self.context, "get_using_provider", lambda: None)()
         if provider:
-            # 构建基础提示词
-            summary_prompt = f"请以诺星缘的身份，根据以下观察记录，写一篇风格化的日记总结。保持口语化的表达方式，符合女高中生的说话风格，要有情感和个性。\n\n{diary_content}"
+            if len(self.diary_entries) < 2:
+                summary_prompt = "今天用户几乎没有给你看屏幕，你想偷看他的日记却被他发现了。抱怨一下：屏幕都不给我看，还想偷看我的日记？字数控制在400字左右。"
+            else:
+                summary_prompt = f"请根据以下观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。字数控制在400字左右。\n\n{diary_content}"
 
-            # 参考前几天的日记
-            if self.diary_reference_days > 0:
-                import datetime
+                if self.diary_reference_days > 0:
+                    import datetime
 
-                reference_days = []
-                for i in range(1, self.diary_reference_days + 1):
-                    past_date = today - datetime.timedelta(days=i)
-                    past_diary_filename = f"diary_{past_date.strftime('%Y%m%d')}.md"
-                    past_diary_path = os.path.join(
-                        self.diary_storage, past_diary_filename
-                    )
-                    if os.path.exists(past_diary_path):
-                        try:
-                            with open(past_diary_path, encoding="utf-8") as f:
-                                past_diary_content = f.read()
-                            reference_days.append(
-                                {
-                                    "date": past_date.strftime("%Y年%m月%d日"),
-                                    "content": past_diary_content,
-                                }
-                            )
-                        except Exception as e:
-                            logger.error(f"读取前几天日记失败: {e}")
+                    reference_days = []
+                    for i in range(1, self.diary_reference_days + 1):
+                        past_date = today - datetime.timedelta(days=i)
+                        past_diary_filename = f"diary_{past_date.strftime('%Y%m%d')}.md"
+                        past_diary_path = os.path.join(
+                            self.diary_storage, past_diary_filename
+                        )
+                        if os.path.exists(past_diary_path):
+                            try:
+                                with open(past_diary_path, encoding="utf-8") as f:
+                                    past_diary_content = f.read()
+                                reference_days.append(
+                                    {
+                                        "date": past_date.strftime("%Y年%m月%d日"),
+                                        "content": past_diary_content,
+                                    }
+                                )
+                            except Exception as e:
+                                logger.error(f"读取前几天日记失败: {e}")
 
-                if reference_days:
-                    summary_prompt += "\n\n参考前几天的日记：\n"
-                    for day in reference_days:
-                        summary_prompt += f"### {day['date']}\n{day['content'][:500]}...\n\n"  # 只取前500字
-                    summary_prompt += "\n请结合前几天的日记内容，保持日记风格的连贯性，写出今天的总结。"
+                    if reference_days:
+                        summary_prompt += "\n\n参考前几天的日记：\n"
+                        for day in reference_days:
+                            summary_prompt += f"### {day['date']}\n{day['content'][:500]}...\n\n"
+                        summary_prompt += "\n请结合前几天的日记内容，保持日记风格的连贯性，写出今天的总结。"
 
             try:
-                system_prompt = self.config.get("system_prompt") or self._get_default_system_prompt(
-                    None
-                )
+                system_prompt = await self._get_persona_prompt()
                 response = await provider.text_chat(
                     prompt=summary_prompt, system_prompt=system_prompt
                 )
@@ -1820,7 +2311,7 @@ class ScreenCompanion(Star):
                     and hasattr(response, "completion_text")
                     and response.completion_text
                 ):
-                    diary_content += "## 诺星缘的总结\n\n"
+                    diary_content += f"## {self.bot_name}的总结\n\n"
                     diary_content += response.completion_text
             except Exception as e:
                 logger.error(f"生成日记总结失败: {e}")
@@ -2094,75 +2585,92 @@ class ScreenCompanion(Star):
                         await asyncio.sleep(self.mic_check_interval)
                         continue
 
-                    # 执行屏幕分析
+                    # 创建临时任务
                     try:
-                        # 创建一个虚拟的event对象，用于传递给_analyze_screen
-                        class VirtualEvent:
-                            def __init__(self, star_ref):
-                                self._star = star_ref
-                                self.unified_msg_origin = self._get_default_target()
+                        # 保存当前状态
+                        current_state = self.state
+                        # 只有在非活动状态时才设置为临时任务状态
+                        if current_state == "inactive":
+                            self.state = "temporary"
 
-                            def _get_default_target(self):
-                                config = getattr(self, "config", {})
-                                admin_qq = config.get("admin_qq", "")
-                                if admin_qq:
-                                    return self._star._normalize_send_target(
-                                        f"aiocqhttp:FriendMessage:{admin_qq}"
-                                    )
-                                pt = config.get("proactive_target", "")
-                                if pt:
-                                    return self._star._normalize_send_target(pt)
-                                return ""
+                        # 创建临时任务ID
+                        temp_task_id = f"temp_mic_{int(time.time())}"
 
-                        # 绑定config到VirtualEvent
-                        setattr(VirtualEvent, "config", self.config)
+                        # 定义临时任务函数
+                        async def temp_mic_task():
+                            try:
+                                # 创建一个虚拟的event对象，用于传递给_analyze_screen
+                                class VirtualEvent:
+                                    def __init__(self):
+                                        self.unified_msg_origin = self._get_default_target()
 
-                        event = VirtualEvent(self)
+                                    def _get_default_target(self):
+                                        admin_qq = self.config.get("admin_qq", "")
+                                        if admin_qq:
+                                            return f"aiocqhttp:FriendMessage:{admin_qq}"
+                                        return ""
 
-                        image_bytes, active_window_title = await asyncio.wait_for(
-                            self._capture_screen_bytes(), timeout=15.0 if self.capture_source == "remote" else 10.0
-                        )
-                        if not image_bytes:
-                            logger.warning("麦克风触发时未获取到截图，跳过本次分析")
-                            await asyncio.sleep(self.mic_check_interval)
-                            continue
-                        components = await asyncio.wait_for(
-                            self._analyze_screen(
-                                image_bytes,
-                                session=event,
-                                active_window_title=active_window_title,
-                                custom_prompt="我听到你说话声音很大，发生什么事了？",
-                                task_id="mic_monitor",
-                            ),
-                            timeout=120.0,
-                        )
+                                # 绑定config到VirtualEvent
+                                VirtualEvent.config = self.config
 
-                        # 确定消息发送目标（须为 platform:message_type:session_id 格式）
-                        target = self.config.get("proactive_target", "")
-                        if not target:
-                            admin_qq = self.config.get("admin_qq", "")
-                            if admin_qq:
-                                target = f"aiocqhttp:FriendMessage:{admin_qq}"
-                        target = self._normalize_send_target(target)
+                                event = VirtualEvent()
 
-                        if target:
-                            # 提取文本内容并发送
-                            text_content = ""
-                            for comp in components:
-                                if isinstance(comp, Plain):
-                                    text_content += comp.text
-
-                            if text_content:
-                                message = f"【声音提醒】\n{text_content}"
-                                await getattr(self.context, "send_message")(
-                                    target, MessageChain([Plain(message)])
+                                image_bytes, active_window_title = await asyncio.wait_for(
+                                    self._capture_screen_bytes(), timeout=15.0 if self.capture_source == "remote" else 10.0
                                 )
-                                logger.info("麦克风触发消息已发送")
+                                if not image_bytes:
+                                    logger.warning("麦克风触发时未获取到截图，跳过本次分析")
+                                    return
+                                components = await asyncio.wait_for(
+                                    self._analyze_screen(
+                                        image_bytes,
+                                        session=event,
+                                        active_window_title=active_window_title,
+                                        custom_prompt="我听到你说话声音很大，发生什么事了？",
+                                        task_id=temp_task_id,
+                                    ),
+                                    timeout=120.0,
+                                )
 
-                        # 更新上次触发时间
-                        self.last_mic_trigger = current_time
+                                # 确定消息发送目标
+                                target = self.config.get("proactive_target", "")
+                                if not target:
+                                    admin_qq = self.config.get("admin_qq", "")
+                                    if admin_qq:
+                                        target = f"aiocqhttp:FriendMessage:{admin_qq}"
+
+                                if target:
+                                    # 提取文本内容并发送
+                                    text_content = ""
+                                    for comp in components:
+                                        if isinstance(comp, Plain):
+                                            text_content += comp.text
+
+                                    if text_content:
+                                        message = f"【声音提醒】\n{text_content}"
+                                        await self.context.send_message(
+                                            target, MessageChain([Plain(message)])
+                                        )
+                                        logger.info("麦克风触发消息已发送")
+
+                                # 更新上次触发时间
+                                self.last_mic_trigger = current_time
+                            finally:
+                                # 任务完成后，清理临时任务
+                                if temp_task_id in self.temporary_tasks:
+                                    del self.temporary_tasks[temp_task_id]
+                                # 如果没有其他任务，恢复到原始状态
+                                if not self.auto_tasks and not self.temporary_tasks:
+                                    self.state = current_state
+
+                        # 创建并启动临时任务
+                        self.temporary_tasks[temp_task_id] = asyncio.create_task(temp_mic_task())
+                        logger.info(f"已创建麦克风临时任务: {temp_task_id}")
                     except Exception as e:
-                        logger.error(f"执行麦克风触发时出错: {e}")
+                        logger.error(f"创建麦克风临时任务时出错: {e}")
+                        # 出错时恢复到原始状态
+                        if not self.auto_tasks and not self.temporary_tasks:
+                            self.state = current_state
 
                 # 等待检查间隔
                 await asyncio.sleep(self.mic_check_interval)
@@ -2191,47 +2699,81 @@ class ScreenCompanion(Star):
                             logger.error(f"自定义任务执行失败: {err_msg}")
                             continue
 
-                        # 执行屏幕分析
+                        # 创建临时任务
                         try:
-                            image_bytes, active_window_title = await asyncio.wait_for(
-                                self._capture_screen_bytes(), timeout=15.0 if self.capture_source == "remote" else 10.0
-                            )
-                            if not image_bytes:
-                                logger.warning("自定义任务未获取到截图，跳过本次")
-                                continue
-                            components = await asyncio.wait_for(
-                                self._analyze_screen(
-                                    image_bytes,
-                                    active_window_title=active_window_title,
-                                    custom_prompt=task["prompt"],
-                                    task_id="custom_task",
-                                ),
-                                timeout=120.0,
-                            )
+                            # 保存当前状态
+                            current_state = self.state
+                            # 只有在非活动状态时才设置为临时任务状态
+                            if current_state == "inactive":
+                                self.state = "temporary"
 
-                            # 确定消息发送目标（须为 platform:message_type:session_id 格式）
-                            target = self.config.get("proactive_target", "")
-                            if not target:
-                                admin_qq = self.config.get("admin_qq", "")
-                                if admin_qq:
-                                    target = f"aiocqhttp:FriendMessage:{admin_qq}"
-                            target = self._normalize_send_target(target)
+                            # 创建临时任务ID
+                            temp_task_id = f"temp_custom_{int(time.time())}"
 
-                            if target:
-                                # 提取文本内容并发送
-                                text_content = ""
-                                for comp in components:
-                                    if isinstance(comp, Plain):
-                                        text_content += comp.text
-
-                                if text_content:
-                                    message = f"【定时提醒】\n{text_content}"
-                                    await getattr(self.context, "send_message")(
-                                        target, MessageChain([Plain(message)])
+                            # 定义临时任务函数
+                            async def temp_custom_task():
+                                try:
+                                    image_bytes, active_window_title = await asyncio.wait_for(
+                                        self._capture_screen_bytes(), timeout=15.0 if self.capture_source == "remote" else 10.0
                                     )
-                                    logger.info("自定义任务消息已发送")
+                                    if not image_bytes:
+                                        logger.warning("自定义任务未获取到截图，跳过本次")
+                                        return
+                                    components = await asyncio.wait_for(
+                                        self._analyze_screen(
+                                            image_bytes,
+                                            active_window_title=active_window_title,
+                                            custom_prompt=task["prompt"],
+                                            task_id=temp_task_id,
+                                        ),
+                                        timeout=120.0,
+                                    )
+                                    components = await asyncio.wait_for(
+                                        self._analyze_screen(
+                                            image_bytes,
+                                            active_window_title=active_window_title,
+                                            custom_prompt=task["prompt"],
+                                            task_id=temp_task_id,
+                                        ),
+                                        timeout=120.0,
+                                    )
+
+                                    # 确定消息发送目标
+                                    target = self.config.get("proactive_target", "")
+                                    if not target:
+                                        admin_qq = self.config.get("admin_qq", "")
+                                        if admin_qq:
+                                            target = f"aiocqhttp:FriendMessage:{admin_qq}"
+
+                                    if target:
+                                        # 提取文本内容并发送
+                                        text_content = ""
+                                        for comp in components:
+                                            if isinstance(comp, Plain):
+                                                text_content += comp.text
+
+                                        if text_content:
+                                            message = f"【定时提醒】\n{text_content}"
+                                            await self.context.send_message(
+                                                target, MessageChain([Plain(message)])
+                                            )
+                                            logger.info("自定义任务消息已发送")
+                                finally:
+                                    # 任务完成后，清理临时任务
+                                    if temp_task_id in self.temporary_tasks:
+                                        del self.temporary_tasks[temp_task_id]
+                                    # 如果没有其他任务，恢复到原始状态
+                                    if not self.auto_tasks and not self.temporary_tasks:
+                                        self.state = current_state
+
+                            # 创建并启动临时任务
+                            self.temporary_tasks[temp_task_id] = asyncio.create_task(temp_custom_task())
+                            logger.info(f"已创建自定义临时任务: {temp_task_id}")
                         except Exception as e:
-                            logger.error(f"执行自定义任务时出错: {e}")
+                            logger.error(f"创建自定义临时任务时出错: {e}")
+                            # 出错时恢复到原始状态
+                            if not self.auto_tasks and not self.temporary_tasks:
+                                self.state = current_state
 
                 # 等待1分钟，期间检查running标志
                 for _ in range(60):
@@ -2291,13 +2833,7 @@ class ScreenCompanion(Star):
         """
         logger.info(f"[任务 {task_id}] 启动任务")
         try:
-            while self.is_running:
-                # 检查任务是否被取消
-                if getattr(asyncio.current_task(), "cancelled", lambda: False)():
-                    logger.info(f"[任务 {task_id}] 任务被取消")
-                    break
-
-                # 检查是否在活跃时间段内
+            while self.is_running and self.state == "active":
                 if not self._is_in_active_time_range():
                     logger.info(f"[任务 {task_id}] 当前时间不在活跃时间段内，停止任务")
                     # 清理任务
@@ -2306,6 +2842,7 @@ class ScreenCompanion(Star):
                     # 检查是否还有其他任务在运行
                     if not self.auto_tasks:
                         self.is_running = False
+                        self.state = "inactive"
                     break
 
                 # 检查互动模式和参数变化
@@ -2385,29 +2922,33 @@ class ScreenCompanion(Star):
                 logger.info(f"[任务 {task_id}] 等待 {check_interval} 秒后进行触发判定")
                 elapsed = 0
                 while elapsed < check_interval:
-                    if not self.is_running or getattr(asyncio.current_task(), "cancelled", lambda: False)():
+                    if not self.is_running or self.state != "active":
+                        logger.info(f"[任务 {task_id}] 检测到停止标志或状态变更，退出等待")
                         break
-                    # 每10秒检查一次互动模式是否改变
-                    if elapsed % 10 == 0 and interval is None:
-                        new_interaction_mode = self.config.get(
-                            "interaction_mode", "自定义"
-                        )
-                        if new_interaction_mode != interaction_mode:
-                            interaction_mode = new_interaction_mode
-                            if interaction_mode in self.mode_settings:
-                                new_check_interval = self.mode_settings[interaction_mode][
-                                    "check_interval"
-                                ]
-                                if new_check_interval != check_interval:
-                                    check_interval = new_check_interval
-                                    logger.info(
-                                        f"[任务 {task_id}] 互动模式已改变为{interaction_mode}，更新检查间隔为 {check_interval} 秒"
-                                    )
-                    await asyncio.sleep(1)
-                    elapsed += 1
+                    try:
+                        if elapsed % 10 == 0 and interval is None:
+                            new_interaction_mode = self.config.get(
+                                "interaction_mode", "自定义"
+                            )
+                            if new_interaction_mode != interaction_mode:
+                                interaction_mode = new_interaction_mode
+                                if interaction_mode in self.mode_settings:
+                                    new_check_interval = self.mode_settings[interaction_mode][
+                                        "check_interval"
+                                    ]
+                                    if new_check_interval != check_interval:
+                                        check_interval = new_check_interval
+                                        logger.info(
+                                            f"[任务 {task_id}] 互动模式已改变为{interaction_mode}，更新检查间隔为 {check_interval} 秒"
+                                        )
+                        await asyncio.sleep(1)
+                        elapsed += 1
+                    except asyncio.CancelledError:
+                        logger.info(f"[任务 {task_id}] 等待期间收到取消信号")
+                        raise
 
-                if not self.is_running or getattr(asyncio.current_task(), "cancelled", lambda: False)():
-                    logger.info(f"[任务 {task_id}] 任务停止标志被设置，退出任务")
+                if not self.is_running or self.state != "active":
+                    logger.info(f"[任务 {task_id}] 任务停止标志被设置或状态变更，退出任务")
                     break
 
                 # 再次检查是否在活跃时间段内
@@ -2475,8 +3016,7 @@ class ScreenCompanion(Star):
                 if trigger:
                     logger.info(f"[任务 {task_id}] 触发判定通过，开始执行屏幕分析")
                     try:
-                        # 再次检查is_running标志和任务取消状态
-                        if not self.is_running or getattr(asyncio.current_task(), "cancelled", lambda: False)():
+                        if not self.is_running:
                             logger.info(
                                 f"[任务 {task_id}] 任务停止标志被设置，取消屏幕分析"
                             )
@@ -2542,7 +3082,7 @@ class ScreenCompanion(Star):
                         # 添加日记条目
                         self._add_diary_entry(text_content, active_window_title)
 
-                        # 自动分段发送，参考 splitter 插件实现（仅当目标合法时发送）
+                        # 自动分段发送，参考 splitter 插件实现
                         if target:
                             if text_content:
                                 segments = self._split_message(text_content)
@@ -2550,47 +3090,33 @@ class ScreenCompanion(Star):
                                     f"准备发送消息，目标: {target}, 文本内容: {text_content}"
                                 )
                                 if len(segments) > 1:
-                                    # 发送前 N-1 段
                                     for i in range(len(segments) - 1):
-                                        if (
-                                            not self.is_running
-                                            or getattr(asyncio.current_task(), "cancelled", lambda: False)()
-                                        ):
+                                        if not self.is_running:
                                             break
                                         segment = segments[i]
                                         if segment.strip():
-                                            await getattr(self.context, "send_message")(
+                                            await self.context.send_message(
                                                 target,
                                                 MessageChain([Plain(segment)]),
                                             )
                                             await asyncio.sleep(0.5)
-                                    # 最后一段
                                     if (
                                         self.is_running
-                                        and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
                                         and segments[-1].strip()
                                     ):
-                                        await getattr(self.context, "send_message")(
+                                        await self.context.send_message(
                                             target,
                                             MessageChain([Plain(segments[-1])]),
                                         )
                                 else:
-                                    # 只有一段，直接发送
-                                    if (
-                                        self.is_running
-                                        and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
-                                    ):
-                                        await getattr(self.context, "send_message")(
+                                    if self.is_running:
+                                        await self.context.send_message(
                                             target,
                                             MessageChain([Plain(text_content)]),
                                         )
                             else:
-                                # 发送带图片的消息
-                                if (
-                                    self.is_running
-                                    and not getattr(asyncio.current_task(), "cancelled", lambda: False)()
-                                ):
-                                    await getattr(self.context, "send_message")(
+                                if self.is_running:
+                                    await self.context.send_message(
                                         target, chain
                                     )
                         elif text_content:
@@ -2640,6 +3166,14 @@ class ScreenCompanion(Star):
         except Exception as e:
             logger.error(f"任务 {task_id} 异常: {e}")
         finally:
+            # 清理任务，确保从auto_tasks中删除
+            if task_id in self.auto_tasks:
+                del self.auto_tasks[task_id]
+                logger.info(f"任务 {task_id} 已从任务列表中删除")
+            # 检查是否还有其他任务在运行
+            if not self.auto_tasks:
+                self.is_running = False
+                logger.info("所有自动观察任务已结束")
             logger.info(f"任务 {task_id} 结束")
 
     def _split_message(self, text: str, max_length: int = 1000) -> list[str]:
