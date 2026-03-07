@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Screen Companion WebUI</title>
+    <link rel="stylesheet" href="/web/app.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Screen Companion WebUI</h1>
+            <nav>
+                <ul>
+                    <li><a href="#diaries" class="nav-link active">日记</a></li>
+                    <li><a href="#observations" class="nav-link">观察记录</a></li>
+                    <li><a href="#memories" class="nav-link">记忆</a></li>
+                </ul>
+            </nav>
+        </header>
+        
+        <main>
+            <section id="diaries" class="section active">
+                <h2>日记管理</h2>
+                <div class="diary-list" id="diaryList"></div>
+                <div class="diary-detail" id="diaryDetail"></div>
+            </section>
+            
+            <section id="observations" class="section">
+                <h2>观察记录</h2>
+                <div class="observation-list" id="observationList"></div>
+            </section>
+            
+            <section id="memories" class="section">
+                <h2>记忆管理</h2>
+                <div class="memory-list" id="memoryList"></div>
+            </section>
+        </main>
+        
+        <footer>
+            <p>Screen Companion WebUI v1.0.0</p>
+        </footer>
+    </div>
+    
+    <script src="/web/app.js"></script>
+</body>
+</html>
