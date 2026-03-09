@@ -397,6 +397,25 @@
       "enabled": true
     }
   },
+  "use_shared_screenshot_dir": {
+    "description": "启用共享截图目录",
+    "type": "bool",
+    "hint": "主要用于 Docker 等无法直接截图的部署环境。开启后，插件会优先从共享目录读取截图；默认关闭，普通桌面环境建议保持关闭。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "shared_screenshot_dir": {
+    "description": "共享截图目录路径",
+    "type": "string",
+    "hint": "当启用共享截图目录后生效。建议挂载为宿主机持续更新截图的目录。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "use_shared_screenshot_dir": true
+    }
+  },
   "custom_tasks": {
     "description": "自定义监控任务",
     "type": "text",

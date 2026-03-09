@@ -60,6 +60,8 @@ class PluginConfig(BaseModel):
     admin_qq: str = ""
     proactive_target: str = ""
     save_local: bool = True
+    use_shared_screenshot_dir: bool = False
+    shared_screenshot_dir: str = ""
     custom_tasks: str = ""
     rest_time_range: str = "22:00-06:00"
     enable_learning: bool = True

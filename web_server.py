@@ -604,8 +604,8 @@ class WebServer:
         """获取配置信息"""
         try:
             return self._ok({
-                "version": "2.4.0",
-                "plugin_version": "2.4.0"
+                "version": "2.4.1",
+                "plugin_version": "2.4.1"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -687,6 +687,9 @@ class WebServer:
                 "title": "识屏与视觉",
                 "description": "控制截图理解质量、外部视觉接口和识别提示词。",
                 "fields": [
+                    "save_local",
+                    "use_shared_screenshot_dir",
+                    "shared_screenshot_dir",
                     "bot_vision_quality",
                     "image_quality",
                     "image_prompt",

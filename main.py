@@ -227,6 +227,8 @@ class ScreenCompanion(Star):
         self.admin_qq = self.plugin_config.admin_qq
         self.proactive_target = self.plugin_config.proactive_target
         self.save_local = self.plugin_config.save_local
+        self.use_shared_screenshot_dir = self.plugin_config.use_shared_screenshot_dir
+        self.shared_screenshot_dir = self.plugin_config.shared_screenshot_dir
         self.custom_tasks = self.plugin_config.custom_tasks
         self.rest_time_range = self.plugin_config.rest_time_range
         self.enable_learning = self.plugin_config.enable_learning
@@ -715,6 +717,7 @@ class ScreenCompanion(Star):
             "- 语气像熟悉用户节奏的陪伴者，真实、自然、不过分热情。",
             "- 优先输出有信息量的评论、提醒、共情或轻建议，避免空泛夸奖。",
             "- 不要使用“作为助手”“根据屏幕内容”等出戏表述。",
+            "- 不要先叫用户名字，不要用“我看到你在”“看你在”“你正在看”这类播报式开场。",
             "- 除非真的合适，不要连续提问；如果要问，只问一个能推进对话的小问题。",
             "- 如果判断不够确定，要明确保留余地，不要装作完全看懂。",
             "- 回复尽量控制在 2 句话内，最多 3 句话。",
@@ -730,6 +733,29 @@ class ScreenCompanion(Star):
         if scene_style:
             guide_lines.append(f"- 当前场景的额外说话方式：{scene_style}")
         return "\n".join(guide_lines)
+
+    def _polish_response_text(self, response: str, scene: str = "") -> str:
+        import re
+
+        text = str(response or "").strip()
+        if not text:
+            return text
+
+        normalized_scene = self._normalize_scene_label(scene)
+        leading_patterns = [
+            rf"^\s*{re.escape(str(self.bot_name or '').strip())}[，,：:\s]+",
+            r"^\s*(我看到你在|我看你在|看你在|看起来你在|你正在看|你在看)\s*",
+        ]
+
+        if normalized_scene in {"视频", "阅读"}:
+            for pattern in leading_patterns:
+                if pattern == leading_patterns[0] and not str(self.bot_name or "").strip():
+                    continue
+                text = re.sub(pattern, "", text, count=1)
+
+        text = re.sub(r"^(，|,|：|:|\s)+", "", text).strip()
+        text = re.sub(r"\s{2,}", " ", text)
+        return text
 
     @staticmethod
     def _get_scene_response_style(scene: str) -> str:
@@ -1577,114 +1603,167 @@ class ScreenCompanion(Star):
             import os
             from PIL import Image
 
-            # 共享目录路径
-            import os
-            
-            # 优先使用环境变量
-            screenshots_dir = os.environ.get("SCREENSHOT_DIR")
-            
-            # 如果没有环境变量，尝试使用AstrBot数据目录
-            if not screenshots_dir:
-                # 尝试从当前文件路径推断AstrBot数据目录
-                try:
-                    # 当前文件路径: plugins/astrbot_plugin_screen_companion/main.py
-                    # 目标路径: screenshots/
-                    current_dir = os.path.dirname(os.path.abspath(__file__))
-                    screenshots_dir = os.path.join(current_dir, '..', '..', 'screenshots')
-                    # 规范化路径
-                    screenshots_dir = os.path.normpath(screenshots_dir)
-                except Exception:
-                    # 如果失败，使用Windows默认路径
-                    screenshots_dir = "c:\\Users\\99505\\.astrbot\\data\\screenshots"
-            
-            # 检查共享目录是否存在，如果不存在则创建
-            if not os.path.exists(screenshots_dir):
+            shared_dir_enabled = bool(getattr(self, "use_shared_screenshot_dir", False))
+            configured_shared_dir = str(getattr(self, "shared_screenshot_dir", "") or "").strip()
+
+            def resolve_shared_screenshot_dir() -> str:
+                if configured_shared_dir:
+                    return os.path.normpath(configured_shared_dir)
+
+                env_dir = str(os.environ.get("SCREENSHOT_DIR") or "").strip()
+                if env_dir:
+                    return os.path.normpath(env_dir)
+
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                return os.path.normpath(os.path.join(current_dir, "..", "..", "screenshots"))
+
+            def persist_shared_screenshot(image_bytes: bytes) -> None:
+                if not shared_dir_enabled:
+                    return
+
+                screenshots_dir = resolve_shared_screenshot_dir()
                 try:
                     os.makedirs(screenshots_dir, exist_ok=True)
-                    logger.info(f"创建共享目录: {screenshots_dir}")
+                    timestamp = int(time.time())
+                    target_path = os.path.join(screenshots_dir, f"screenshot_{timestamp}.jpg")
+                    latest_path = os.path.join(screenshots_dir, "screenshot_latest.jpg")
+                    with open(target_path, "wb") as f:
+                        f.write(image_bytes)
+                    with open(latest_path, "wb") as f:
+                        f.write(image_bytes)
                 except Exception as e:
-                    logger.error(f"创建共享目录失败: {e}")
-                    # 回退到容器内截图（如果支持）
+                    logger.warning(f"写入共享截图目录失败: {e}")
+
+            def get_active_window_info():
+                title = ""
+                region = None
+                if sys.platform != "win32":
+                    return title, region
+
                 try:
-                    import pyautogui
-                    screenshot = pyautogui.screenshot()
-                    if screenshot.mode != "RGB":
-                        screenshot = screenshot.convert("RGB")
-                    img_byte_arr = io.BytesIO()
-                    quality_val = self.image_quality
-                    try:
-                        quality = max(10, min(100, int(quality_val)))
-                    except (ValueError, TypeError):
-                        quality = 70
-                    screenshot.save(img_byte_arr, format="JPEG", quality=quality)
-                    return img_byte_arr.getvalue(), "容器内截图"
+                    import pygetwindow
+
+                    active_window = pygetwindow.getActiveWindow()
+                    if not active_window:
+                        return title, region
+
+                    title = str(active_window.title or "").strip()
+                    left = int(getattr(active_window, "left", 0) or 0)
+                    top = int(getattr(active_window, "top", 0) or 0)
+                    width = int(getattr(active_window, "width", 0) or 0)
+                    height = int(getattr(active_window, "height", 0) or 0)
+                    if width > 20 and height > 20:
+                        region = (left, top, width, height)
                 except Exception as e:
-                    logger.error(f"容器内截图也失败: {e}")
-                    raise
-            
-            # 获取所有截图文件
-            screenshot_files = [f for f in os.listdir(screenshots_dir) if f.startswith("screenshot_") and f.endswith(".jpg")]
-            
-            if not screenshot_files:
-                logger.error("共享目录中没有截图文件")
-                # 回退到容器内截图（如果支持）
-                try:
-                    import pyautogui
-                    screenshot = pyautogui.screenshot()
-                    if screenshot.mode != "RGB":
-                        screenshot = screenshot.convert("RGB")
-                    img_byte_arr = io.BytesIO()
-                    quality_val = self.image_quality
-                    try:
-                        quality = max(10, min(100, int(quality_val)))
-                    except (ValueError, TypeError):
-                        quality = 70
-                    screenshot.save(img_byte_arr, format="JPEG", quality=quality)
-                    return img_byte_arr.getvalue(), "容器内截图"
-                except Exception as e:
-                    logger.error(f"容器内截图也失败: {e}")
-                    raise
-            
-            # 按时间戳排序，获取最新的截图
-            screenshot_files.sort(key=lambda x: int(x.split("_")[1].split(".")[0]), reverse=True)
-            latest_screenshot = screenshot_files[0]
-            screenshot_path = os.path.join(screenshots_dir, latest_screenshot)
-            
-            logger.info(f"使用最新截图: {screenshot_path}")
-            
-            # 读取截图文件
-            try:
-                screenshot = Image.open(screenshot_path)
-                if screenshot.mode != "RGB":
-                    screenshot = screenshot.convert("RGB")
-                
+                    logger.debug(f"获取活动窗口信息失败: {e}")
+
+                return title, region
+
+            def encode_image_to_jpeg_bytes(image):
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
                 img_byte_arr = io.BytesIO()
                 quality_val = self.image_quality
                 try:
                     quality = max(10, min(100, int(quality_val)))
                 except (ValueError, TypeError):
                     quality = 70
-                
-                screenshot.save(img_byte_arr, format="JPEG", quality=quality)
-                return img_byte_arr.getvalue(), "宿主机截图"
+                image.save(img_byte_arr, format="JPEG", quality=quality)
+                return img_byte_arr.getvalue()
+
+            def capture_live_screenshot():
+                import pyautogui
+
+                active_title, active_region = get_active_window_info()
+                screenshot = None
+
+                if self.capture_mode == "active_window" and active_region:
+                    try:
+                        screenshot = pyautogui.screenshot(region=active_region)
+                    except Exception as e:
+                        logger.warning(f"活动窗口截图失败，将回退为全屏截图: {e}")
+
+                if screenshot is None:
+                    screenshot = pyautogui.screenshot()
+
+                source_label = active_title or ("活动窗口截图" if self.capture_mode == "active_window" else "实时截图")
+                image_bytes = encode_image_to_jpeg_bytes(screenshot)
+                persist_shared_screenshot(image_bytes)
+                return image_bytes, source_label
+
+            if not shared_dir_enabled:
+                try:
+                    return capture_live_screenshot()
+                except Exception as e:
+                    logger.error(f"实时截图失败: {e}")
+                    raise
+
+            screenshots_dir = resolve_shared_screenshot_dir()
+
+            if not os.path.exists(screenshots_dir):
+                logger.warning(f"共享截图目录不存在，将回退为实时截图: {screenshots_dir}")
+                try:
+                    return capture_live_screenshot()
+                except Exception as e:
+                    logger.error(f"实时截图失败: {e}")
+                    raise
+            
+            # 获取所有截图文件
+            screenshot_files = [f for f in os.listdir(screenshots_dir) if f.startswith("screenshot_") and f.endswith(".jpg")]
+            
+            if not screenshot_files:
+                logger.warning("共享目录中没有截图文件，将回退为实时截图")
+                try:
+                    return capture_live_screenshot()
+                except Exception as e:
+                    logger.error(f"实时截图失败: {e}")
+                    raise
+
+            screenshot_candidates = []
+            for filename in screenshot_files:
+                screenshot_path = os.path.join(screenshots_dir, filename)
+                try:
+                    stat = os.stat(screenshot_path)
+                    screenshot_candidates.append((stat.st_mtime, filename, screenshot_path))
+                except OSError as e:
+                    logger.debug(f"读取截图文件信息失败 {screenshot_path}: {e}")
+
+            if not screenshot_candidates:
+                logger.warning("截图目录中存在候选文件，但都无法读取元数据，回退为实时截图")
+                try:
+                    return capture_live_screenshot()
+                except Exception as e:
+                    logger.error(f"实时截图失败: {e}")
+                    raise
+
+            screenshot_candidates.sort(key=lambda item: item[0], reverse=True)
+            latest_mtime, latest_screenshot, screenshot_path = screenshot_candidates[0]
+            screenshot_age = max(0.0, time.time() - float(latest_mtime))
+
+            if screenshot_age > 20:
+                logger.warning(
+                    f"最新共享截图已过期 {screenshot_age:.1f} 秒: {screenshot_path}，将优先尝试实时截图"
+                )
+                try:
+                    return capture_live_screenshot()
+                except Exception as e:
+                    logger.warning(f"实时截图失败，将退回到共享截图: {e}")
+
+            logger.info(
+                f"使用最新截图: {screenshot_path} (mtime={datetime.datetime.fromtimestamp(latest_mtime).isoformat(timespec='seconds')})"
+            )
+
+            # 读取截图文件
+            try:
+                with Image.open(screenshot_path) as screenshot:
+                    screenshot.load()
+                    return encode_image_to_jpeg_bytes(screenshot), f"共享截图:{latest_screenshot}"
             except Exception as e:
                 logger.error(f"读取截图文件失败: {e}")
-                # 回退到容器内截图（如果支持）
                 try:
-                    import pyautogui
-                    screenshot = pyautogui.screenshot()
-                    if screenshot.mode != "RGB":
-                        screenshot = screenshot.convert("RGB")
-                    img_byte_arr = io.BytesIO()
-                    quality_val = self.image_quality
-                    try:
-                        quality = max(10, min(100, int(quality_val)))
-                    except (ValueError, TypeError):
-                        quality = 70
-                    screenshot.save(img_byte_arr, format="JPEG", quality=quality)
-                    return img_byte_arr.getvalue(), "容器内截图"
+                    return capture_live_screenshot()
                 except Exception as e:
-                    logger.error(f"容器内截图也失败: {e}")
+                    logger.error(f"实时截图失败: {e}")
                     raise
 
         result = await asyncio.to_thread(_core_task)
@@ -2284,6 +2363,9 @@ class ScreenCompanion(Star):
                     "\n- 如果内容允许，可以补一层轻度分析，例如剧情走向、人物关系、论点张力，"
                     "但别写成长评。"
                 )
+                interaction_prompt += (
+                    "\n- 直接接住画面、台词、情绪或节奏来聊，像一起沉进去，不要先点名用户，也不要先播报他在看什么。"
+                )
             else:
                 interaction_prompt += (
                     "\n- 更适合围绕用户眼下的动作给出即时回应，让人感觉你是真的在陪他。"
@@ -2344,6 +2426,9 @@ class ScreenCompanion(Star):
             
             # 添加不确定性表达
             response_text = self._add_uncertainty(response_text)
+
+            # 清理沉浸感较差的播报式开场，尤其是视频/阅读场景。
+            response_text = self._polish_response_text(response_text, scene)
             
             # 调整互动频率（模拟用户回应，实际应根据真实回应调整）
             # 这里使用一个简单的模拟，实际应用中应根据用户的真实回复调整
