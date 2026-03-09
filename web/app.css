@@ -283,6 +283,45 @@ button { cursor: pointer; }
     gap: 12px;
 }
 
+.helper-grid {
+    display: grid;
+    gap: 12px;
+}
+
+.runtime-insights,
+.settings-helper {
+    margin-top: 16px;
+}
+
+.helper-card {
+    padding: 16px 18px;
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(255, 251, 247, 0.9), rgba(249, 238, 228, 0.82));
+    border: 1px solid rgba(188, 108, 37, 0.12);
+    display: grid;
+    gap: 8px;
+}
+
+.helper-card strong {
+    font-size: 1rem;
+}
+
+.helper-card p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.6;
+}
+
+.helper-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.helper-button {
+    width: fit-content;
+}
+
 .settings-group-button {
     width: 100%;
     text-align: left;
@@ -325,6 +364,11 @@ button { cursor: pointer; }
     border: 1px solid rgba(97, 77, 64, 0.08);
 }
 
+.settings-field-dirty {
+    border-color: rgba(188, 108, 37, 0.22);
+    box-shadow: 0 14px 28px rgba(188, 108, 37, 0.08);
+}
+
 .settings-field-wide {
     grid-column: 1 / -1;
 }
@@ -349,6 +393,29 @@ button { cursor: pointer; }
     font-size: 0.78rem;
 }
 
+.settings-badges {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+    align-items: center;
+}
+
+.settings-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 9px;
+    border-radius: 999px;
+    background: rgba(42, 34, 29, 0.06);
+    color: var(--muted);
+    font-size: 0.78rem;
+}
+
+.settings-badge-warm {
+    background: rgba(188, 108, 37, 0.12);
+    color: #9b4d17;
+}
+
 .settings-field-hint {
     margin: 0 0 10px;
     color: var(--muted);
@@ -360,6 +427,12 @@ button { cursor: pointer; }
 .runtime-stats {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.health-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
 }
 
@@ -375,6 +448,19 @@ button { cursor: pointer; }
     margin-top: 6px;
     font-size: 1.3rem;
     font-family: var(--font-display);
+}
+
+.health-card {
+    padding: 16px;
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.7);
+    border: 1px solid rgba(97, 77, 64, 0.08);
+}
+
+.health-card strong {
+    display: block;
+    margin-top: 6px;
+    font-size: 1.05rem;
 }
 
 .control-form {
@@ -720,7 +806,7 @@ button { cursor: pointer; }
 .error-text { color: var(--danger); min-height: 1.2em; }
 
 @media (max-width: 1080px) {
-.hero, .diaries-grid, .memory-highlights, .memory-groups, .runtime-grid, .settings-grid, .settings-form { grid-template-columns: 1fr; }
+.hero, .diaries-grid, .memory-highlights, .memory-groups, .runtime-grid, .settings-grid, .settings-form, .health-grid { grid-template-columns: 1fr; }
     .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 

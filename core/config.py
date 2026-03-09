@@ -33,11 +33,15 @@ class PluginConfig(BaseModel):
     watch_mode: str = "偷看"
     capture_mode: str = "fullscreen"
     bot_vision_quality: int = 85
-    image_prompt: str = "请详细分析这张屏幕截图，捕捉以下细节：1. 屏幕上的具体应用程序、窗口和界面元素 2. 用户正在进行的具体操作和任务 3. 屏幕上的详细文字、图片、图标等内容 4. 用户的操作习惯和行为模式 5. 任何可能被忽略的细节信息。请提供详细的分析结果，重点突出用户当前活动的具体细节，以便我能准确了解用户正在做什么。"
+    image_prompt: str = "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。"
     use_external_vision: bool = True
     vision_api_url: str = ""
     vision_api_key: str = ""
     vision_api_model: str = ""
+    # 备用视觉API配置
+    vision_api_url_backup: str = ""
+    vision_api_key_backup: str = ""
+    vision_api_model_backup: str = ""
     user_preferences: str = "游戏 专业的游戏高手，指导玩家提升水平"
     start_end_mode: str = "llm"
     start_preset: str = "知道啦~我会时不时过来看一眼的"
@@ -60,6 +64,10 @@ class PluginConfig(BaseModel):
     admin_qq: str = ""
     proactive_target: str = ""
     save_local: bool = True
+    enable_natural_language_screen_assist: bool = False
+    enable_window_companion: bool = False
+    window_companion_targets: str = ""
+    window_companion_check_interval: int = 5
     use_shared_screenshot_dir: bool = False
     shared_screenshot_dir: str = ""
     custom_tasks: str = ""

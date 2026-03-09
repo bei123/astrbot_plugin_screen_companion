@@ -82,6 +82,7 @@
                             <span class="panel-subtle" id="runtimeMeta">等待加载</span>
                         </div>
                         <div class="runtime-stats" id="runtimeStats"></div>
+                        <div class="helper-grid runtime-insights" id="runtimeInsights"></div>
                     </article>
                     <article class="panel">
                         <div class="panel-header">
@@ -150,6 +151,15 @@
                         </form>
                     </article>
                 </div>
+                <article class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h3>服务自检</h3>
+                            <span class="panel-subtle" id="healthMeta">用于确认当前页面连到的是不是正确的 WebUI 实例。</span>
+                        </div>
+                    </div>
+                    <div class="health-grid" id="healthGrid"></div>
+                </article>
             </section>
             <section id="settings" class="section">
                 <div class="section-heading">
@@ -183,6 +193,7 @@
                                 <button class="primary-button" id="saveSettingsButton" type="button">保存配置</button>
                             </div>
                         </div>
+                        <div class="helper-grid settings-helper" id="settingsHelper"></div>
                         <div class="settings-form" id="settingsForm"></div>
                         <p class="feedback" id="settingsFeedback"></p>
                     </article>

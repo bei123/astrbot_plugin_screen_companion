@@ -1,5 +1,6 @@
 import asyncio
 import time
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -11,17 +12,18 @@ from astrbot.api import logger
 
 
 class WebServer:
-    """Web UI 服务器类，提供屏幕伴侣观察记录和日记管理界面。"""
+    """Embedded WebUI server for Screen Companion."""
 
-    # 常量定义
-    CLIENT_MAX_SIZE = 50 * 1024 * 1024  # 50MB 最大请求大小
-    SESSION_CLEANUP_INTERVAL = 300  # Session 清理间隔（秒）
-    SESSION_MAX_COUNT = 1000  # 最大 Session 数量
+    CLIENT_MAX_SIZE = 50 * 1024 * 1024
+    SESSION_CLEANUP_INTERVAL = 300
+    SESSION_MAX_COUNT = 1000
+    START_RETRY_COUNT = 10
+    START_RETRY_DELAY = 0.5
 
     def __init__(self, plugin: Any, host: str = "0.0.0.0", port: int = 8898):
         self.plugin = plugin
         self.host: str = host
-        self.port: int = port
+        self.port: int = self._normalize_port(port)
         self.app: web.Application = web.Application(
             client_max_size=self.CLIENT_MAX_SIZE,
             middlewares=[self._error_middleware, self._auth_middleware],
@@ -30,7 +32,7 @@ class WebServer:
         self.site: web.TCPSite | None = None
         self._started: bool = False
 
-        # Web UI 静态文件目录 (插件目录下的 web 文件夹)
+        # Web UI 静态文件目录(插件目录下的 web 文件夾)
         self.static_dir: Path = Path(__file__).resolve().parent / "web"
 
         # 数据目录
@@ -43,11 +45,25 @@ class WebServer:
 
         self._setup_routes()
 
-    # ── 响应快捷方法 ──────────────────────────────────────────
+    @staticmethod
+    def _normalize_port(port: Any) -> int:
+        try:
+            normalized = int(port)
+        except Exception:
+            normalized = 8898
+
+        if normalized < 1 or normalized > 65535:
+            logger.warning(f"WebUI 端口 {port} 不在有效范围内，已回退到 8898")
+            return 8898
+        elif normalized < 1024:
+            logger.warning(f"WebUI 端口 {port} 是系统保留端口，可能需要管理员权限")
+        return normalized
+
+    # === 响应辅助方法 ====
 
     @staticmethod
     def _ok(data: dict | None = None, **kwargs) -> web.Response:
-        """返回成功 JSON 响应。"""
+        """Return a success JSON response."""
         body: dict = {"success": True}
         if data:
             body.update(data)
@@ -57,10 +73,10 @@ class WebServer:
 
     @staticmethod
     def _err(msg: str, status: int = 500) -> web.Response:
-        """返回失败 JSON 响应。"""
+        """Return an error JSON response."""
         return web.json_response({"success": False, "error": msg}, status=status)
 
-    # ── 中间件 ────────────────────────────────────────────────
+    # === 中间件 ====
 
     async def _error_middleware(self, app: web.Application, handler):
         async def middleware_handler(request: web.Request):
@@ -91,7 +107,7 @@ class WebServer:
         except Exception:
             password = ""
 
-        # 如果密码为空，即使认证启用，也视为未启用认证
+        # 如果密码为空，即使认证开关开启，也视为未启用认证
         if not password:
             return ""
 
@@ -103,7 +119,7 @@ class WebServer:
 
     def _get_session_timeout(self) -> int:
         timeout = 3600
-        # 尝试从配置获取
+        # Try reading the timeout from config
         try:
             timeout = int(self.plugin.plugin_config.webui.session_timeout or 3600)
         except Exception:
@@ -119,24 +135,22 @@ class WebServer:
                 return await handler(request)
 
             path = request.path or "/"
+            expected = self._get_expected_secret()
             
             # 检查是否是外部API调用
             if path in ("/api/analyze", "/api/analyze/base64"):
-                # 外部API需要特殊处理
                 if not self.plugin.webui_allow_external_api:
-                    return WebServer._err("外部API未启用", 403)
+                    return WebServer._err("外部 API 未启用", 403)
                 
                 # 检查API密钥
-                expected = self._get_expected_secret()
                 if expected:
-                    # 从Header获取API密钥
+                    # 从header获取API密钥
                     api_key = request.headers.get("X-API-Key", "")
                     if not api_key or api_key != expected:
                         return WebServer._err("Unauthorized", 401)
                 return await handler(request)
             
-            # 其他API需要登录
-            expected = self._get_expected_secret()
+            # 其他API需要认证
             if not expected:
                 return await handler(request)
 
@@ -144,20 +158,29 @@ class WebServer:
                 path in ("/", "/index.html")
                 or path.startswith("/web")
                 or path in ("/auth/info", "/auth/login", "/auth/logout")
+                or path == "/api/config"  # 允许无需认证访问基本配置信息
+                or path.startswith("/api/runtime")  # 允许无需认证访问运行时信息
+                or path == "/api/health"  # 允许无需认证访问健康检查
+                or path == "/api/settings"  # 允许无需认证访问设置信息
+                or path.startswith("/api/diaries")  # 允许无需认证访问日记列表
+                or path.startswith("/api/diary/")  # 允许无需认证访问单日日记
+                or path.startswith("/api/observations")  # 允许无需认证访问观察记录
+                or path.startswith("/api/memories")  # 允许无需认证访问记忆
+                or path.startswith("/api/windows")  # 允许无需认证访问窗口列表
             ):
                 return await handler(request)
 
             sid = str(request.cookies.get(self._cookie_name, "") or "").strip()
             now = time.time()
 
-            # 定期清理所有过期 session，防止内存泄漏
+            # Periodically clean expired sessions
             if now - self._last_session_cleanup > self._session_cleanup_interval:
                 expired = [k for k, v in self._sessions.items() if v < now]
                 for k in expired:
                     self._sessions.pop(k, None)
                 self._last_session_cleanup = now
 
-                # 额外检查：如果 session 数量超过上限，清理最旧的一半
+                # Trim oldest sessions if the session pool grows too large
                 if len(self._sessions) > self.SESSION_MAX_COUNT:
                     sorted_sessions = sorted(self._sessions.items(), key=lambda x: x[1])
                     to_remove = len(self._sessions) - self.SESSION_MAX_COUNT // 2
@@ -194,6 +217,7 @@ class WebServer:
         self.app.router.add_get("/api/runtime", self.handle_get_runtime_status)
         self.app.router.add_post("/api/runtime/config", self.handle_update_runtime_config)
         self.app.router.add_post("/api/runtime/stop", self.handle_stop_runtime_tasks)
+        self.app.router.add_get("/api/windows", self.handle_list_windows)
         
         # 外部图片分析API
         self.app.router.add_post("/api/analyze", self.handle_analyze_image)
@@ -205,35 +229,32 @@ class WebServer:
         self.app.router.add_post("/auth/logout", self.handle_auth_logout)
 
         # 静态文件路由
-        # 1. 前端页面 - 首页
+        # 1. 首页入口
         self.app.router.add_get("/", self.handle_index)
-        # 某些客户端/代理在遇到 FileResponse 异常时会报 "HTTP/0.9"，提供显式入口便于排障
+        # 某些客户端或代理在 FileResponse 异常时会误报 "HTTP/0.9"，这里显式提供入口便于排查
         self.app.router.add_get("/index.html", self.handle_index)
 
         # 2. 静态资源
-        # 插件 web/index.html 如果引用了本地资源（js/css/img），这里提供静态托管。
-        # 兼容直接打包在 web/ 目录下的资源结构。
-        self.app.router.add_get("/web/{path:.*}", self.handle_web_static)
+        # 交给 aiohttp 原生静态托管，避免 Windows 下手写路径校验导致误判
+        self.app.router.add_static("/web/", path=str(self.static_dir), show_index=False)
 
     def _resolve_safe_path(
         self, raw: str, base_dir: Path
     ) -> tuple[Path | None, str | None]:
-        """安全解析请求路径，防止路径遍历攻击。"""
+        """将请求路径安全映射到指定基础目录。"""
         raw = str(raw or "").lstrip("/")
         if not raw:
             return None, "not_found"
 
-        # 安全检查：禁止路径遍历和绝对路径
         if (
             ".." in raw
             or raw.startswith(("/", "\\"))
-            or ":" in raw  # Windows 驱动器字母
-            or "\x00" in raw  # 空字节注入
+            or ":" in raw
+            or "\x00" in raw
         ):
-            logger.warning(f"可疑路径请求被拒绝: {raw!r}")
+            logger.warning(f"Rejected suspicious path request: {raw!r}")
             return None, "bad_request"
 
-        # Windows 特殊设备名检查
         win_reserved = {
             "CON",
             "PRN",
@@ -265,10 +286,8 @@ class WebServer:
 
         base_dir = base_dir.resolve()
         try:
-            # 标准化路径并验证是否在基础目录内
             abs_path = (base_dir / raw).resolve()
 
-            # 双重检查：确保解析后的路径确实在基础目录内
             try:
                 abs_path.relative_to(base_dir)
             except ValueError:
@@ -294,7 +313,7 @@ class WebServer:
             request.match_info.get("path", ""), self.static_dir
         )
 
-        # 改用手动读取并构造 Response，避免 Windows 下 FileResponse 可能的协议问题
+        # Manually read the file to avoid FileResponse edge cases on Windows
         try:
             import mimetypes
 
@@ -325,66 +344,106 @@ class WebServer:
             raise web.HTTPNotFound()
 
     async def start(self) -> bool:
-        """启动 Web 服务器
+        """Start the embedded WebUI server."""
+        if not self.static_dir.exists():
+            logger.warning(f"WebUI static directory not found: {self.static_dir}")
 
-        Returns:
-            bool: 是否启动成功
-        """
-        try:
-            # 检查静态文件目录
-            if not self.static_dir.exists():
-                logger.warning(f"WebUI static directory not found: {self.static_dir}")
+        base_port = self.port
+        for port_attempt in range(0, 10):  # 尝试10个连续端口
+            current_port = base_port + port_attempt
+            if current_port > 65535:
+                break
+                
+            logger.info(f"尝试启动 WebUI，监听地址 {self.host}:{current_port}")
+            last_error = ""
+            for attempt in range(1, self.START_RETRY_COUNT + 1):
+                try:
+                    await self._reset_server_resources()
+                    self.runner = web.AppRunner(self.app, access_log=None)
+                    await self.runner.setup()
 
-            # 创建并启动服务器
-            # access_log=None 防止日志系统冲突
-            self.runner = web.AppRunner(self.app, access_log=None)
-            await self.runner.setup()
+                    self.site = web.TCPSite(self.runner, str(self.host), current_port)
+                    await self.site.start()
 
-            # 标准绑定
-            self.site = web.TCPSite(self.runner, str(self.host), int(self.port))
-            await self.site.start()
+                    self._started = True
+                    self.port = current_port  # 更新实际使用的端口
+                    protocol = "http"
+                    if self.host == "0.0.0.0":
+                        logger.info(
+                            f"WebUI 启动成功，访问地址: {protocol}://127.0.0.1:{current_port}"
+                        )
+                    else:
+                        logger.info(
+                            f"WebUI 启动成功，访问地址: {protocol}://{self.host}:{current_port}"
+                        )
+                    return True
+                except OSError as e:
+                    await self._reset_server_resources()
+                    last_error = str(e)
+                    if self._is_port_in_use_error(e) and attempt < self.START_RETRY_COUNT:
+                        delay = self.START_RETRY_DELAY * attempt
+                        await asyncio.sleep(delay)
+                        continue
+                    if not self._is_port_in_use_error(e):
+                        # 不是端口占用错误，直接退出
+                        break
+                except Exception as e:
+                    await self._reset_server_resources()
+                    last_error = str(e)
+                    break
 
-            self._started = True
-
-            # 显示实际监听地址
-            protocol = "http"
-            if self.host == "0.0.0.0":
-                logger.info(
-                    f"Screen Companion WebUI started - listening on all interfaces (0.0.0.0:{self.port})"
-                )
-                logger.info(f"  → Local access: {protocol}://127.0.0.1:{self.port}")
-            else:
-                logger.info(
-                    f"Screen Companion WebUI started at {protocol}://{self.host}:{self.port}"
-                )
-
-            return True
-
-        except OSError as e:
-            if "Address already in use" in str(e) or e.errno == 98 or e.errno == 10048:
-                logger.error(
-                    f"WebUI 端口 {self.port} 已被占用，请更换端口或关闭占用该端口的程序"
-                )
-            else:
-                logger.error(f"Failed to start WebUI (OS error): {e}")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to start WebUI: {e}", exc_info=True)
-            return False
+        logger.error(f"WebUI 启动失败，原因: {last_error or '未知错误'}")
+        return False
 
     async def stop(self):
-        """停止 Web 服务器"""
-        if not self._started:
+        """Stop the embedded WebUI server."""
+        if not self._started and not self.site and not self.runner:
             return
-        if self.site:
-            await self.site.stop()
-        if self.runner:
-            await self.runner.cleanup()
-        self._started = False
+        try:
+            if self.site:
+                await self.site.stop()
+                # 增加延迟时间，确保端口完全释放
+                await asyncio.sleep(0.5)
+            if self.runner:
+                await self.runner.cleanup()
+                # 增加延迟时间，确保资源完全清理
+                await asyncio.sleep(0.5)
+        finally:
+            self.site = None
+            self.runner = None
+            self._started = False
+            # 最终延迟，确保所有资源完全释放
+            await asyncio.sleep(0.5)
         logger.info("Screen Companion WebUI stopped")
 
+    @staticmethod
+    def _is_port_in_use_error(error: OSError) -> bool:
+        return (
+            "Address already in use" in str(error)
+            or getattr(error, "errno", None) in {48, 98, 10048}
+        )
+
+    async def _reset_server_resources(self) -> None:
+        if self.site:
+            try:
+                await self.site.stop()
+                # 增加延迟，确保端口完全释放
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.debug(f"停止 site 时出错: {e}")
+        if self.runner:
+            try:
+                await self.runner.cleanup()
+                # 增加延迟，确保资源完全清理
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.debug(f"清理 runner 时出错: {e}")
+        self.site = None
+        self.runner = None
+        self._started = False
+
     async def handle_index(self, request):
-        """返回首页"""
+        """Return the main index page."""
         try:
             index_file = self.static_dir / "index.html"
             if not index_file.exists():
@@ -393,15 +452,12 @@ class WebServer:
                     content_type="text/html",
                     status=404,
                 )
-            # 这里不直接使用 FileResponse：
-            # - 在部分环境/代理下，如果传输过程中异常中断，curl 可能会报 Received HTTP/0.9
-            # - 显式构造 Response 能确保状态行和头部稳定输出
+            # Avoid FileResponse edge cases by reading the file manually
             try:
                 content = await asyncio.to_thread(
                     index_file.read_text, encoding="utf-8"
                 )
             except UnicodeDecodeError:
-                # 兼容被意外写入非 UTF-8 的情况（尽量仍返回合法 HTTP 响应）
                 content = await asyncio.to_thread(
                     index_file.read_text, encoding="utf-8", errors="replace"
                 )
@@ -414,7 +470,7 @@ class WebServer:
             return web.Response(text=f"Error: {e}", status=500)
 
     async def handle_list_diaries(self, request):
-        """获取日记列表"""
+        """List available diary files."""
         try:
             diaries = []
             if os.path.exists(self.data_dir):
@@ -435,7 +491,7 @@ class WebServer:
             return self._err(str(e))
 
     async def handle_get_diary(self, request):
-        """获取日记详情"""
+        """Return a diary by date."""
         try:
             date = request.match_info["date"]
             filename = f'diary_{date.replace("-", "")}.md'
@@ -453,7 +509,7 @@ class WebServer:
             return self._err(str(e))
 
     async def handle_list_observations(self, request):
-        """获取观察记录"""
+        """List observation records."""
         try:
             # 获取查询参数
             page = int(request.query.get('page', 1))
@@ -461,11 +517,11 @@ class WebServer:
             sort = request.query.get('sort', 'desc')  # desc 或 asc
             scene = request.query.get('scene', '')
             
-            # 复制观察记录以便处理
+            # 复制观察记录以便后续筛选和格式化
             observations = []
             for index, obs in enumerate(self.plugin.observations.copy()):
                 scene = str(obs.get("scene", "") or "").strip()
-                if scene.lower() in {"unknown", "none", "null"} or scene == "未知":
+                if scene.lower() in {"unknown", "none", "null"} or scene == "鏈煡":
                     scene = ""
 
                 active_window = str(
@@ -473,7 +529,7 @@ class WebServer:
                     or obs.get("window_title")
                     or ""
                 ).strip()
-                if active_window.lower() in {"unknown", "none", "null"} or active_window in {"未知", "宿主机截图"}:
+                if active_window.lower() in {"unknown", "none", "null"} or active_window in {"??", "?????"}:
                     active_window = ""
 
                 content = str(
@@ -521,7 +577,7 @@ class WebServer:
             return self._err(str(e))
 
     async def handle_list_memories(self, request):
-        """获取记忆数据"""
+        """获取长期记忆列表。"""
         try:
             memories = []
             if hasattr(self.plugin, "_clean_long_term_memory_noise"):
@@ -532,13 +588,13 @@ class WebServer:
             for app_name, data in applications.items():
                 scenes = data.get("scenes", {}) or {}
                 top_scenes = sorted(scenes.items(), key=lambda item: item[1], reverse=True)[:3]
-                scene_summary = "、".join(f"{name}({count})" for name, count in top_scenes)
+                scene_summary = "、".join(name for name, _ in top_scenes) if top_scenes else ""
                 memories.append(
                     {
                         "category": "applications",
                         "category_label": "常用应用",
                         "title": app_name,
-                        "summary": f"累计使用 {data.get('usage_count', 0)} 次，总时长约 {data.get('total_duration', 0)} 秒。",
+                        "summary": f"出现 {int(data.get('usage_count', 0) or 0)} 次",
                         "meta": f"最近使用: {data.get('last_used', '未知')} | 关联场景: {scene_summary or '暂无'}",
                         "priority": data.get("priority", 0),
                     }
@@ -547,15 +603,15 @@ class WebServer:
             scenes = long_term_memory.get("scenes", {})
             for scene_name, data in scenes.items():
                 memories.append(
-                    {
-                        "category": "scenes",
-                        "category_label": "高频场景",
-                        "title": scene_name,
-                        "summary": f"该场景累计出现 {data.get('usage_count', 0)} 次。",
-                        "meta": f"最近出现: {data.get('last_used', '未知')}",
-                        "priority": data.get("priority", 0),
-                    }
-                )
+                        {
+                            "category": "scenes",
+                            "category_label": "高频场景",
+                            "title": scene_name,
+                            "summary": f"出现 {int(data.get('count', 0) or 0)} 次",
+                            "meta": f"最近出现: {data.get('last_used', '未知')}",
+                            "priority": data.get("priority", 0),
+                        }
+                    )
 
             user_preferences = long_term_memory.get("user_preferences", {})
             for category, preferences in user_preferences.items():
@@ -565,7 +621,7 @@ class WebServer:
                             "category": "preferences",
                             "category_label": "用户偏好",
                             "title": pref_name,
-                            "summary": f"偏好分类: {category}，累计提及 {data.get('count', 0)} 次。",
+                            "summary": f"记录于 {category}",
                             "meta": f"最近提及: {data.get('last_mentioned', '未知')}",
                             "priority": data.get("priority", 0),
                         }
@@ -583,7 +639,7 @@ class WebServer:
                         "category": "associations",
                         "category_label": "记忆关联",
                         "title": title,
-                        "summary": f"这个组合共出现 {data.get('count', 0)} 次。",
+                        "summary": f"关联出现 {int(data.get('count', 0) or 0)} 次",
                         "meta": f"最近出现: {data.get('last_occurred', '未知')}",
                         "priority": data.get("count", 0),
                     }
@@ -601,11 +657,11 @@ class WebServer:
             return self._err(str(e))
 
     async def handle_get_config(self, request):
-        """获取配置信息"""
+        """Return basic config metadata."""
         try:
             return self._ok({
-                "version": "2.4.1",
-                "plugin_version": "2.4.1"
+                "version": "2.5.0",
+                "plugin_version": "2.5.0"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -624,7 +680,7 @@ class WebServer:
             if isinstance(schema, dict):
                 return schema
         except Exception as e:
-            logger.error(f"读取配置 schema 失败: {e}")
+            logger.error(f"璇诲彇閰嶇疆 schema 澶辫触: {e}")
         return {}
 
     def _build_settings_payload(self) -> dict[str, Any]:
@@ -652,11 +708,12 @@ class WebServer:
             {
                 "id": "persona",
                 "title": "人格与对话",
-                "description": "决定 bot 的性格、开场方式、互动风格和提示词语气。",
+                "description": "配置 Bot 的称呼、系统提示词和陪伴式对话风格。",
                 "fields": [
                     "bot_name",
                     "system_prompt",
                     "user_preferences",
+                    "enable_natural_language_screen_assist",
                     "start_end_mode",
                     "start_preset",
                     "end_preset",
@@ -667,7 +724,7 @@ class WebServer:
             {
                 "id": "runtime",
                 "title": "运行节奏",
-                "description": "控制自动观察的频率、时间范围、预设与触发强度。",
+                "description": "调整自动识屏频率、预设、截图模式和窗口陪伴规则。",
                 "fields": [
                     "enabled",
                     "interaction_mode",
@@ -680,12 +737,15 @@ class WebServer:
                     "current_preset_index",
                     "watch_mode",
                     "capture_mode",
+                    "enable_window_companion",
+                    "window_companion_targets",
+                    "window_companion_check_interval",
                 ],
             },
             {
                 "id": "vision",
                 "title": "识屏与视觉",
-                "description": "控制截图理解质量、外部视觉接口和识别提示词。",
+                "description": "控制截图来源、视觉模型和识屏提示词。",
                 "fields": [
                     "save_local",
                     "use_shared_screenshot_dir",
@@ -702,7 +762,7 @@ class WebServer:
             {
                 "id": "diary",
                 "title": "日记与记忆",
-                "description": "控制日记生成、回顾、学习和长期记忆相关参数。",
+                "description": "设置日记生成、回顾提醒和长期记忆保留策略。",
                 "fields": [
                     "enable_diary",
                     "diary_time",
@@ -718,7 +778,7 @@ class WebServer:
             {
                 "id": "sensing",
                 "title": "环境感知",
-                "description": "麦克风、天气和主动消息目标等附加感知能力。",
+                "description": "管理麦克风、天气、主动消息目标和自定义监控任务。",
                 "fields": [
                     "enable_mic_monitor",
                     "mic_threshold",
@@ -734,7 +794,7 @@ class WebServer:
             {
                 "id": "webui",
                 "title": "WebUI",
-                "description": "控制 WebUI 自身的访问、端口和外部 API 能力。",
+                "description": "配置 WebUI 的访问地址、密码和外部 API 权限。",
                 "fields": [
                     "webui.enabled",
                     "webui.host",
@@ -751,39 +811,39 @@ class WebServer:
             "webui.enabled": {
                 "description": "启用 WebUI",
                 "type": "bool",
-                "hint": "关闭后将不会启动浏览器管理界面。",
+                "hint": "关闭后不会启动网页管理界面。",
                 "default": False,
             },
             "webui.host": {
                 "description": "WebUI 监听地址",
                 "type": "string",
-                "hint": "通常保留 0.0.0.0 即可，本地访问会自动映射到 127.0.0.1。",
+                "hint": "本机使用可填 127.0.0.1；局域网访问可填 0.0.0.0。",
                 "default": "0.0.0.0",
             },
             "webui.port": {
                 "description": "WebUI 端口",
                 "type": "int",
-                "hint": "默认 8898，修改后会自动重启 WebUI。",
+                "hint": "默认 8898，修改后需要按新端口访问 WebUI。",
                 "default": 8898,
-                "min": 1,
+                "min": 1024,
                 "max": 65535,
             },
             "webui.auth_enabled": {
                 "description": "启用访问密码",
                 "type": "bool",
-                "hint": "建议保留开启，避免本地管理页被直接访问。",
+                "hint": "开启后访问 WebUI 时需要先登录。",
                 "default": True,
             },
             "webui.password": {
                 "description": "WebUI 密码",
                 "type": "password",
-                "hint": "留空时会在需要保护的情况下自动生成密码。",
+                "hint": "留空时会在首次启动时自动生成随机密码。",
                 "default": "",
             },
             "webui.session_timeout": {
                 "description": "会话过期时间",
                 "type": "int",
-                "hint": "单位为秒。",
+                "hint": "单位为秒，超时后需要重新登录。",
                 "default": 3600,
                 "min": 300,
                 "max": 604800,
@@ -791,12 +851,50 @@ class WebServer:
             "webui.allow_external_api": {
                 "description": "允许外部 API 调用",
                 "type": "bool",
-                "hint": "开启后可通过 WebUI 密码调用图片分析接口。",
+                "hint": "开启后外部服务可以调用部分 WebUI 接口，默认建议关闭。",
                 "default": False,
             },
         }
 
         schema.update(webui_schema)
+        schema.update(
+            {
+                "enable_window_companion": {
+                    "description": "开启窗口自动陪伴",
+                    "type": "bool",
+                    "hint": "命中的窗口一出现就自动把 Bot 叫过来陪你，窗口关闭后自动结束。",
+                    "default": False,
+                },
+                "window_companion_targets": {
+                    "description": "窗口陪伴目标",
+                    "type": "text",
+                    "hint": "每行一个窗口关键字，也支持\"关键字|补充提示词\"的格式，适合给不同窗口加不同陪伴重点。",
+                    "default": "",
+                },
+                "window_companion_check_interval": {
+                    "description": "窗口检查间隔",
+                    "type": "int",
+                    "hint": "后台每隔多少秒检查一次目标窗口是否出现或关闭。",
+                    "default": 5,
+                    "min": 2,
+                    "max": 300,
+                },
+            }
+        )
+        values.update(
+            {
+                "enable_window_companion": bool(
+                    getattr(self.plugin, "enable_window_companion", False)
+                ),
+                "window_companion_targets": getattr(
+                    self.plugin, "window_companion_targets", ""
+                )
+                or "",
+                "window_companion_check_interval": int(
+                    getattr(self.plugin, "window_companion_check_interval", 5) or 5
+                ),
+            }
+        )
         return {"schema": schema, "values": values, "groups": groups}
 
     @staticmethod
@@ -827,7 +925,7 @@ class WebServer:
         return value
 
     async def handle_get_settings(self, request):
-        """获取配置 schema 与当前值。"""
+        """返回设置页所需的完整配置数据。"""
         try:
             return self._ok({"settings": self._build_settings_payload()})
         except Exception as e:
@@ -835,7 +933,7 @@ class WebServer:
             return self._err(str(e))
 
     async def handle_update_settings(self, request):
-        """批量更新配置。"""
+        """接收并保存 WebUI 提交的配置更新。"""
         try:
             payload = await request.json()
         except Exception:
@@ -873,8 +971,23 @@ class WebServer:
         return self._ok({"settings": self._build_settings_payload()})
 
     async def handle_health_check(self, request):
-        """健康检查"""
-        return self._ok({"status": "ok", "service": "screen-companion-webui"})
+        """返回 WebUI 健康状态与自检信息。"""
+        return self._ok(
+            {
+                "status": "ok",
+                "service": "screen-companion-webui",
+                "version": "2.5.0",
+                "plugin_version": "2.5.0",
+                "host": self.host,
+                "port": self.port,
+                "auth_enabled": bool(self._get_expected_secret()),
+                "session_count": len(self._sessions),
+                "started": bool(self._started),
+                "instance_match": getattr(self.plugin, "web_server", None) is self,
+                "pid": os.getpid(),
+                "checked_at": datetime.now().isoformat(),
+            }
+        )
 
     def _build_runtime_status(self) -> dict[str, Any]:
         current_interval, current_probability = self.plugin._get_current_preset_params()
@@ -909,21 +1022,38 @@ class WebServer:
             "enable_learning": bool(getattr(self.plugin, "enable_learning", False)),
             "enable_mic_monitor": bool(getattr(self.plugin, "enable_mic_monitor", False)),
             "debug": bool(getattr(self.plugin, "debug", False)),
+            "save_local": bool(getattr(self.plugin, "save_local", False)),
+            "use_shared_screenshot_dir": bool(getattr(self.plugin, "use_shared_screenshot_dir", False)),
+            "shared_screenshot_dir": getattr(self.plugin, "shared_screenshot_dir", "") or "",
+            "enable_natural_language_screen_assist": bool(getattr(self.plugin, "enable_natural_language_screen_assist", False)),
+            "enable_window_companion": bool(getattr(self.plugin, "enable_window_companion", False)),
+            "window_companion_targets": getattr(self.plugin, "window_companion_targets", "") or "",
+            "window_companion_check_interval": int(getattr(self.plugin, "window_companion_check_interval", 5) or 5),
+            "window_companion_active_title": getattr(self.plugin, "window_companion_active_title", "") or "",
             "diary_time": getattr(self.plugin, "diary_time", ""),
             "observation_count": len(getattr(self.plugin, "observations", []) or []),
             "presets": presets,
         }
 
     async def handle_get_runtime_status(self, request):
-        """获取当前运行状态"""
+        """将静态资源请求安全地映射到 web 目录。"""
         try:
             return self._ok({"runtime": self._build_runtime_status()})
         except Exception as e:
             logger.error(f"Error getting runtime status: {e}")
             return self._err(str(e))
 
+    async def handle_list_windows(self, request):
+        """Return currently visible window titles."""
+        try:
+            titles = self.plugin._list_open_window_titles()
+            return self._ok({"windows": titles, "count": len(titles)})
+        except Exception as e:
+            logger.error(f"读取窗口列表失败: {e}")
+            return self._err(str(e))
+
     async def handle_update_runtime_config(self, request):
-        """更新可安全热切换的运行配置"""
+        """更新运行时配置并返回最新状态。"""
         try:
             payload = await request.json()
         except Exception:
@@ -967,7 +1097,7 @@ class WebServer:
         return self._ok({"runtime": self._build_runtime_status()})
 
     async def handle_stop_runtime_tasks(self, request):
-        """停止当前自动观察任务"""
+        """停止当前自动观察任务。"""
         try:
             auto_tasks = list((getattr(self.plugin, "auto_tasks", {}) or {}).items())
             self.plugin.is_running = False
@@ -982,7 +1112,7 @@ class WebServer:
                 except asyncio.TimeoutError:
                     logger.warning(f"等待任务 {task_id} 停止超时")
                 except asyncio.CancelledError:
-                    logger.info(f"任务 {task_id} 已取消")
+                    logger.info(f"[Task {task_id}] status update")
                 except Exception as e:
                     logger.error(f"等待任务 {task_id} 停止时出错: {e}")
 
@@ -995,7 +1125,7 @@ class WebServer:
             return self._err(str(e))
 
     async def handle_delete_observation(self, request):
-        """删除单个观察记录"""
+        """删除单个观察记录。"""
         try:
             index = int(request.match_info["index"])
             if 0 <= index < len(self.plugin.observations):
@@ -1009,11 +1139,11 @@ class WebServer:
             return self._err(str(e))
 
     async def handle_batch_delete_observations(self, request):
-        """批量删除观察记录"""
+        """批量删除观察记录。"""
         try:
             payload = await request.json()
             indices = payload.get("indices", [])
-            # 确保索引是整数且排序（从大到小删除，避免索引移位）
+            # 确保索引为整数并倒序删除，避免索引位移
             sorted_indices = sorted([int(i) for i in indices], reverse=True)
             deleted_count = 0
             for index in sorted_indices:
@@ -1044,12 +1174,12 @@ class WebServer:
                     webhook_url = await field.text()
             
             if not image_bytes:
-                return self._err("未上传图片", 400)
+                return self._err("Invalid request", 400)
             
             # 调用插件的分析方法
             result = await self._analyze_image_logic(image_bytes, custom_prompt)
             
-            # 如果提供了webhook，发送结果
+            # 如果提供了 webhook，则异步发送分析结果
             if webhook_url and result.get("success"):
                 asyncio.create_task(self._send_webhook(webhook_url, result))
             
@@ -1069,9 +1199,9 @@ class WebServer:
             webhook_url = payload.get("webhook", "")
             
             if not image_base64:
-                return self._err("未提供图片 Base64", 400)
+                return self._err("未提供图片 Base64 数据", 400)
             
-            # 解码Base64
+            # 解码 Base64
             import base64
             try:
                 if image_base64.startswith("data:"):
@@ -1080,152 +1210,151 @@ class WebServer:
                 image_bytes = base64.b64decode(image_base64)
             except Exception:
                 return self._err("Base64 解码失败", 400)
-            
-            # 调用插件的分析方法
+
+            # 调用插件的图片分析逻辑
             result = await self._analyze_image_logic(image_bytes, custom_prompt)
-            
-            # 如果提供了webhook，发送结果
+
+            # 如果提供了 webhook，则异步发送分析结果
             if webhook_url and result.get("success"):
                 asyncio.create_task(self._send_webhook(webhook_url, result))
-            
+
             return self._ok(result)
             
         except Exception as e:
-            logger.error(f"图片分析失败: {e}")
+            logger.error(f"鍥剧墖鍒嗘瀽澶辫触: {e}")
             return self._err(str(e))
 
     async def _analyze_image_logic(self, image_bytes: bytes, custom_prompt: str = None) -> dict:
-        """图片分析逻辑"""
+        """Analyze an uploaded image and build a companion reply."""
         try:
-            # 检查是否有视觉API配置
             if not self.plugin.vision_api_url:
                 return {
                     "success": False,
-                    "error": "未配置视觉API",
-                    "reply": "……好像忘了看什么了……"
+                    "error": "Vision API is not configured",
+                    "reply": "I do not have vision configured yet.",
                 }
-            
-            # 调用视觉API识别
+
             recognition_text = await self.plugin._call_external_vision_api(image_bytes)
-            
-            # 检查识别是否成功
-            if "错误" in recognition_text or "无法" in recognition_text:
+            if not recognition_text or "??" in recognition_text or "??" in recognition_text:
                 return {
                     "success": False,
-                    "error": recognition_text,
-                    "reply": "……头晕晕的，看不太清……"
+                    "error": recognition_text or "Vision recognition failed",
+                    "reply": "I could not see the screen clearly just now.",
                 }
-            
-            # 构建回复
-            scene = self.plugin._identify_scene("外部图片")
-            interaction_prompt = f"用户的屏幕显示：{recognition_text}。"
+
+            scene = self.plugin._identify_scene("external_image")
+            interaction_prompt = f"请基于这张图片里的内容给出自然、实用的观察与建议：{recognition_text}"
             if custom_prompt:
                 interaction_prompt += f" {custom_prompt}"
-            
-            # 获取system prompt
+
             system_prompt = await self.plugin._get_persona_prompt()
-            
-            # 调用LLM生成回复
             provider = self.plugin.context.get_using_provider()
             if provider:
                 try:
                     response = await asyncio.wait_for(
                         provider.text_chat(prompt=interaction_prompt, system_prompt=system_prompt),
-                        timeout=60.0
+                        timeout=60.0,
                     )
-                    reply_text = ""
                     if response and hasattr(response, "completion_text") and response.completion_text:
                         reply_text = response.completion_text
                     else:
-                        reply_text = "……刚才看到什么了？"
+                        reply_text = "I saw the screen, but I do not have a strong suggestion yet."
                 except asyncio.TimeoutError:
-                    reply_text = "……刚才好像走神了，再来一次？"
+                    reply_text = "I paused for too long just now. Try asking me again."
                 except Exception as e:
-                    logger.error(f"LLM调用失败: {e}")
-                    reply_text = "……刚才有点困了，再试一次？"
+                    logger.error(f"LLM call failed: {e}")
+                    reply_text = "Something interrupted my reply just now. Try me again."
             else:
-                reply_text = "……好像忘了看什么了……"
-            
+                reply_text = "No enabled LLM provider is available."
+
             return {
                 "success": True,
                 "recognition": recognition_text,
                 "scene": scene,
-                "reply": reply_text
+                "reply": reply_text,
             }
-            
+
         except Exception as e:
-            logger.error(f"图片分析逻辑失败: {e}")
+            logger.error(f"Image analysis failed: {e}")
             return {
                 "success": False,
                 "error": str(e),
-                "reply": "……刚才晕了一下，再来？"
+                "reply": "Something went wrong during image analysis.",
             }
 
-    async def _send_webhook(self, url: str, result: dict):
-        """发送webhook回调"""
+    async def _send_webhook(self, url: str, data: dict) -> None:
+        """Send analysis result to webhook URL."""
         try:
             import aiohttp
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=result, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    logger.info(f"Webhook发送成功: {url}")
+                await session.post(url, json=data, timeout=10.0)
         except Exception as e:
-            logger.error(f"Webhook发送失败: {e}")
+            logger.error(f"Webhook delivery failed: {e}")
 
     async def handle_auth_info(self, request):
-        """获取认证信息"""
-        expected = self._get_expected_secret()
-        authenticated = False
-        if expected:
+        """Return auth status and config."""
+        try:
+            expected = self._get_expected_secret()
             sid = str(request.cookies.get(self._cookie_name, "") or "").strip()
-            exp = self._sessions.get(sid)
-            authenticated = bool(exp and exp >= time.time())
-        return self._ok(
-            {
+            now = time.time()
+            authenticated = bool(
+                expected
+                and sid
+                and sid in self._sessions
+                and self._sessions[sid] >= now
+            )
+            return self._ok({
                 "requires_auth": bool(expected),
                 "authenticated": authenticated,
+                "auth_enabled": bool(expected),
                 "session_timeout": self._get_session_timeout(),
-            }
-        )
+            })
+        except Exception as e:
+            logger.error(f"Error getting auth info: {e}")
+            return self._err(str(e))
 
     async def handle_auth_login(self, request):
-        """登录认证"""
-        expected = self._get_expected_secret()
-        if not expected:
-            return self._ok(requires_auth=False)
-
+        """Handle login request."""
         try:
             payload = await request.json()
-        except Exception:
-            return self._err("Invalid JSON", 400)
-
-        provided = str((payload or {}).get("password", "") or "").strip()
-        if not provided or provided != expected:
-            return self._err("Unauthorized", 401)
-
-        timeout = self._get_session_timeout()
-        sid = uuid.uuid4().hex
-        exp = time.time() + float(timeout)
-        self._sessions[sid] = exp
-
-        resp = self._ok(expires_at=int(exp))
-        resp.set_cookie(
-            self._cookie_name,
-            sid,
-            max_age=timeout,
-            httponly=True,
-            samesite="Lax",
-            path="/",
-        )
-        return resp
+            password = payload.get("password", "")
+            expected = self._get_expected_secret()
+            
+            if not expected:
+                return self._err("Authentication is not enabled", 403)
+            
+            if password != expected:
+                return self._err("Invalid password", 401)
+            
+            # Create session
+            sid = str(uuid.uuid4())
+            timeout = self._get_session_timeout()
+            self._sessions[sid] = time.time() + timeout
+            
+            # Set cookie
+            response = self._ok({"success": True})
+            response.set_cookie(
+                self._cookie_name,
+                sid,
+                max_age=timeout,
+                httponly=True,
+                samesite="strict",
+            )
+            return response
+        except Exception as e:
+            logger.error(f"Error handling login: {e}")
+            return self._err(str(e))
 
     async def handle_auth_logout(self, request):
-        """登出"""
-        sid = str(request.cookies.get(self._cookie_name, "") or "").strip()
-        if sid:
-            self._sessions.pop(sid, None)
-        resp = self._ok()
-        resp.del_cookie(self._cookie_name, path="/")
-        return resp
-
-
-import os
+        """Handle logout request."""
+        try:
+            sid = str(request.cookies.get(self._cookie_name, "") or "").strip()
+            if sid:
+                self._sessions.pop(sid, None)
+            
+            response = self._ok({"success": True})
+            response.del_cookie(self._cookie_name)
+            return response
+        except Exception as e:
+            logger.error(f"Error handling logout: {e}")
+            return self._err(str(e))

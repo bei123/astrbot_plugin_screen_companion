@@ -14,6 +14,7 @@ const state = {
     sortFilter: "desc",
     memories: [],
     runtime: null,
+    health: null,
     diaryObservationsExpanded: false,
     settingsSchema: {},
     settingsValues: {},
@@ -21,6 +22,7 @@ const state = {
     settingsGroups: [],
     activeSettingsGroup: "persona",
     settingsSearch: "",
+    windowCandidates: [],
 };
 
 const elements = {
@@ -34,6 +36,8 @@ const elements = {
     observationCount: document.getElementById("observationCount"),
     memoryCount: document.getElementById("memoryCount"),
     lastUpdated: document.getElementById("lastUpdated"),
+    healthMeta: document.getElementById("healthMeta"),
+    healthGrid: document.getElementById("healthGrid"),
     diaryList: document.getElementById("diaryList"),
     diaryReflection: document.getElementById("diaryReflection"),
     diaryObservations: document.getElementById("diaryObservations"),
@@ -58,6 +62,7 @@ const elements = {
     loginError: document.getElementById("loginError"),
     runtimeMeta: document.getElementById("runtimeMeta"),
     runtimeStats: document.getElementById("runtimeStats"),
+    runtimeInsights: document.getElementById("runtimeInsights"),
     runtimeForm: document.getElementById("runtimeForm"),
     runtimeFeedback: document.getElementById("runtimeFeedback"),
     enabledSelect: document.getElementById("enabledSelect"),
@@ -74,6 +79,7 @@ const elements = {
     settingsGroupList: document.getElementById("settingsGroupList"),
     settingsGroupTitle: document.getElementById("settingsGroupTitle"),
     settingsGroupDescription: document.getElementById("settingsGroupDescription"),
+    settingsHelper: document.getElementById("settingsHelper"),
     settingsSearchInput: document.getElementById("settingsSearchInput"),
     settingsForm: document.getElementById("settingsForm"),
     settingsFeedback: document.getElementById("settingsFeedback"),
@@ -153,7 +159,8 @@ async function apiFetch(url, options = {}) {
     }
 
     if (!response.ok || payload.success === false) {
-        throw new Error(payload.error || `请求失败 (${response.status})`);
+        const message = payload.error || `请求失败 (${response.status})`;
+        throw new Error(`${message} @ ${url}`);
     }
 
     return payload;
@@ -173,7 +180,7 @@ function hideLoginForm() {
     elements.loginError.textContent = "";
 }
 
-function renderLoading(target, text = "正在加载…") {
+function renderLoading(target, text = "正在加载...") {
     target.innerHTML = `<div class="empty-state"><strong>${escapeHtml(text)}</strong></div>`;
 }
 
@@ -200,6 +207,64 @@ function updateSummaryCards() {
 
 function getSettingMeta(key) {
     return state.settingsSchema[key] || {};
+}
+
+function areSettingValuesEqual(left, right) {
+    return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function isSettingDirty(key) {
+    return !areSettingValuesEqual(state.settingsValues[key], state.settingsSnapshot[key]);
+}
+
+function formatSettingPreview(value) {
+    if (value === undefined || value === null || value === "") return "空";
+    if (typeof value === "boolean") return value ? "开启" : "关闭";
+    const text = String(value).replace(/\s+/g, " ").trim();
+    return text.length > 18 ? `${text.slice(0, 18)}...` : text;
+}
+
+function formatRuntimeSwitch(value, onText = "开启", offText = "关闭") {
+    return value ? onText : offText;
+}
+
+function truncateLabel(value, maxLength = 18) {
+    const text = String(value ?? "").trim();
+    if (!text) return "未命名";
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function setSettingsValues(updates) {
+    state.settingsValues = {
+        ...state.settingsValues,
+        ...updates,
+    };
+    renderSettingsGroups();
+    renderSettingsForm();
+}
+
+function appendWindowCompanionTarget(title) {
+    const target = String(title ?? "").trim();
+    if (!target) return;
+
+    const current = String(state.settingsValues.window_companion_targets || "")
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+    const exists = current.some((item) => item.split("|", 1)[0].trim().toLowerCase() === target.toLowerCase());
+    if (!exists) current.push(target);
+
+    setSettingsValues({
+        enable_window_companion: true,
+        window_companion_targets: current.join("\n"),
+    });
+}
+
+function switchSettingsGroup(groupId) {
+    state.activeSettingsGroup = groupId;
+    renderSettingsGroups();
+    renderSettingsForm();
 }
 
 function getVisibleSettingsGroups() {
@@ -280,11 +345,185 @@ function readSettingInputValue(input, meta) {
     return input.value;
 }
 
+function renderRuntimeInsights(runtime) {
+    elements.runtimeInsights.innerHTML = "";
+    if (!runtime) return;
+
+    const insights = [
+        {
+            title: "识屏模式",
+            body: runtime.use_shared_screenshot_dir
+                ? `当前为共享截图目录模式，适合 Docker 等无法直接截图的环境。${runtime.shared_screenshot_dir ? `目录：${runtime.shared_screenshot_dir}` : "建议确认共享目录路径已配置且会持续更新。"}`
+                : "当前为实时截图模式，适合普通桌面环境，能避免误读旧截图。",
+            actions: [{ label: "调整识屏设置", action: "open-vision-group" }],
+        },
+        {
+            title: "自然语言求助",
+            body: runtime.enable_natural_language_screen_assist
+                ? "已开启。用户明确说“帮我看看屏幕”这类话时，Bot 会主动识屏并给建议。"
+                : "默认关闭，可减少误触。如果你希望 Bot 在自然对话里主动帮你看屏幕，可以手动打开。",
+            actions: [
+                { label: runtime.enable_natural_language_screen_assist ? "关闭求助触发" : "开启求助触发", action: "toggle-screen-assist" },
+                { label: "前往人格设置", action: "open-persona-group" },
+            ],
+        },
+        {
+            title: "窗口自动陪伴",
+            body: runtime.enable_window_companion
+                ? `已开启。${runtime.window_companion_active_title ? `当前正陪着《${runtime.window_companion_active_title}》。` : "会在命中的窗口出现时自动过来，窗口关闭后自动退场。"}`
+                : "默认关闭。适合给常用游戏、IDE 或视频播放器做“窗口一开就来”的陪伴联动。",
+            actions: [{ label: "配置窗口陪伴", action: "open-runtime-group" }],
+        },
+        {
+            title: "截图留存",
+            body: runtime.save_local
+                ? "当前会在本地保留最近一次截图，方便排查识屏结果。"
+                : "当前不会保留本地截图，更省空间，也更偏隐私友好。",
+            actions: [],
+        },
+    ];
+
+    insights.forEach((item) => {
+        const card = document.createElement("article");
+        card.className = "helper-card";
+        const actions = item.actions.length
+            ? `<div class="helper-actions">${item.actions.map((action) => `<button type="button" class="ghost-button helper-button" data-settings-action="${escapeHtml(action.action)}">${escapeHtml(action.label)}</button>`).join("")}</div>`
+            : "";
+        card.innerHTML = `
+            <strong>${escapeHtml(item.title)}</strong>
+            <p>${escapeHtml(item.body)}</p>
+            ${actions}
+        `;
+        elements.runtimeInsights.appendChild(card);
+    });
+}
+
+function renderHealthChecks() {
+    elements.healthGrid.innerHTML = "";
+    if (!state.health) {
+        elements.healthMeta.textContent = "尚未完成服务自检。";
+        elements.healthGrid.appendChild(cloneEmptyState());
+        return;
+    }
+
+    const health = state.health;
+    elements.healthMeta.textContent = `最近检查: ${formatDateTime(health.checked_at)} | 服务: ${health.service || "unknown"}`;
+    const cards = [
+        ["健康状态", health.status || "unknown"],
+        ["实例版本", health.version || "--"],
+        ["插件版本", health.plugin_version || "--"],
+        ["监听地址", `${health.host || "--"}:${health.port || "--"}`],
+        ["实例匹配", health.instance_match ? "当前实例" : "可能不是当前实例"],
+        ["访问保护", health.auth_enabled ? "已开启" : "未开启"],
+        ["服务 PID", health.pid || "--"],
+        ["Session 数", health.session_count ?? 0],
+    ];
+
+    cards.forEach(([label, value]) => {
+        const card = document.createElement("article");
+        card.className = "health-card";
+        card.innerHTML = `<span class="panel-label">${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>`;
+        elements.healthGrid.appendChild(card);
+    });
+}
+
+function renderSettingsHelper(activeGroup, currentValues) {
+    elements.settingsHelper.innerHTML = "";
+    if (!activeGroup) return;
+
+    const cards = [];
+
+    if (activeGroup.id === "vision") {
+        cards.push({
+            title: currentValues.use_shared_screenshot_dir ? "Docker / 共享目录模式" : "实时截图模式",
+            body: currentValues.use_shared_screenshot_dir
+                ? `当前会优先读取共享目录里的截图。${currentValues.shared_screenshot_dir ? `目录：${currentValues.shared_screenshot_dir}` : "建议补充共享目录路径。"}`
+                : "普通桌面环境推荐保持这个模式，能避免读到旧图，也不需要额外挂载截图目录。",
+            actions: currentValues.use_shared_screenshot_dir
+                ? [{ label: "改回实时截图推荐值", action: "vision-live" }]
+                : [{ label: "切到 Docker 模式", action: "vision-docker" }],
+        });
+        cards.push({
+            title: "识屏建议",
+            body: "如果要减少 token，优先把 image_prompt 保持简短，并只让模型输出任务、阶段、关键线索和一个建议点。",
+            actions: [],
+        });
+    }
+
+    if (activeGroup.id === "persona") {
+        cards.push({
+            title: currentValues.enable_natural_language_screen_assist ? "自然语言识屏求助已开启" : "自然语言识屏求助已关闭",
+            body: currentValues.enable_natural_language_screen_assist
+                ? "现在用户明确求助时，Bot 会主动看屏幕再回答。适合游戏出装、做题、排错这类场景。"
+                : "默认关闭更稳，避免普通聊天误触发。只有你希望 Bot 在自然对话里主动识屏时再打开。",
+            actions: [
+                { label: currentValues.enable_natural_language_screen_assist ? "关闭它" : "开启它", action: "toggle-screen-assist" },
+                { label: "查看识屏设置", action: "open-vision-group" },
+            ],
+        });
+    }
+
+    if (activeGroup.id === "runtime") {
+        cards.push({
+            title: currentValues.enable_window_companion ? "窗口自动陪伴已开启" : "窗口自动陪伴已关闭",
+            body: currentValues.enable_window_companion
+                ? "命中的窗口出现后，Bot 会自动开陪伴；窗口关掉后会自动退场。适合常驻游戏、IDE、视频播放器。"
+                : "打开后就能把某个窗口和陪伴任务绑定起来，不需要每次手动把 Bot 叫过来。",
+            actions: [
+                {
+                    label: currentValues.enable_window_companion ? "关闭自动陪伴" : "开启自动陪伴",
+                    action: "toggle-window-companion",
+                },
+                { label: "读取当前窗口", action: "load-window-candidates" },
+            ],
+        });
+
+        if (state.windowCandidates.length) {
+            cards.push({
+                title: "当前窗口候选",
+                body: "点一个就会把它追加到“窗口陪伴目标”，并自动打开窗口陪伴开关。",
+                actions: state.windowCandidates.slice(0, 8).map((title, index) => ({
+                    label: truncateLabel(title, 12),
+                    action: `window-candidate::${index}`,
+                })),
+            });
+        }
+    }
+
+    if (activeGroup.id === "webui") {
+        cards.push({
+            title: "WebUI 提醒",
+            body: "host、port 和访问保护这类设置更适合改完后重启插件再验证。这样更容易避开端口占用和旧实例残留。",
+            actions: [],
+        });
+    }
+
+    if (!cards.length) {
+        elements.settingsHelper.classList.add("hidden");
+        return;
+    }
+
+    elements.settingsHelper.classList.remove("hidden");
+    cards.forEach((item) => {
+        const card = document.createElement("article");
+        card.className = "helper-card";
+        const actions = item.actions.length
+            ? `<div class="helper-actions">${item.actions.map((action) => `<button type="button" class="ghost-button helper-button" data-settings-action="${escapeHtml(action.action)}">${escapeHtml(action.label)}</button>`).join("")}</div>`
+            : "";
+        card.innerHTML = `
+            <strong>${escapeHtml(item.title)}</strong>
+            <p>${escapeHtml(item.body)}</p>
+            ${actions}
+        `;
+        elements.settingsHelper.appendChild(card);
+    });
+}
 function renderSettingsGroups() {
     const visibleGroups = getVisibleSettingsGroups();
     elements.settingsGroupList.innerHTML = "";
+    const dirtyCount = Object.keys(state.settingsValues).filter((key) => isSettingDirty(key)).length;
     elements.settingsSummary.textContent = visibleGroups.length
-        ? `当前可见 ${visibleGroups.length} 个配置分组。`
+        ? `当前可见 ${visibleGroups.length} 个配置分组，待保存 ${dirtyCount} 项。`
         : "没有匹配到配置项。";
 
     if (!visibleGroups.length) {
@@ -297,12 +536,13 @@ function renderSettingsGroups() {
     }
 
     visibleGroups.forEach((group) => {
+        const groupDirtyCount = (group.fields || []).filter((fieldKey) => isSettingDirty(fieldKey)).length;
         const button = document.createElement("button");
         button.type = "button";
         button.className = "settings-group-button";
         if (group.id === state.activeSettingsGroup) button.classList.add("active");
         button.innerHTML = `
-            <strong>${escapeHtml(group.title)}</strong>
+            <strong>${escapeHtml(group.title)}${groupDirtyCount ? ` · ${groupDirtyCount}` : ""}</strong>
             <span>${escapeHtml(group.description || "")}</span>
         `;
         button.addEventListener("click", () => {
@@ -322,15 +562,19 @@ function renderSettingsForm() {
     if (!activeGroup) {
         elements.settingsGroupTitle.textContent = "没有匹配结果";
         elements.settingsGroupDescription.textContent = "换个关键词试试，或者清空筛选。";
+        elements.settingsHelper.classList.add("hidden");
+        elements.settingsHelper.innerHTML = "";
         elements.settingsForm.appendChild(cloneEmptyState());
         return;
     }
 
     elements.settingsGroupTitle.textContent = activeGroup.title;
-    elements.settingsGroupDescription.textContent = activeGroup.description || "编辑后点击保存即可写回插件配置。";
+    const groupDirtyCount = (activeGroup.fields || []).filter((fieldKey) => isSettingDirty(fieldKey)).length;
+    elements.settingsGroupDescription.textContent = `${activeGroup.description || "编辑后点击保存即可写回插件配置。"}${groupDirtyCount ? ` 当前分组有 ${groupDirtyCount} 项待保存。` : ""}`;
 
     const currentValues = { ...state.settingsValues };
     const visibleFields = activeGroup.fields.filter((fieldKey) => shouldShowSettingField(fieldKey, currentValues));
+    renderSettingsHelper(activeGroup, currentValues);
 
     if (!visibleFields.length) {
         const empty = cloneEmptyState();
@@ -344,12 +588,21 @@ function renderSettingsForm() {
         const meta = getSettingMeta(fieldKey);
         const wrapper = document.createElement("label");
         wrapper.className = meta.type === "text" ? "field settings-field settings-field-wide" : "field settings-field";
+        if (isSettingDirty(fieldKey)) wrapper.classList.add("settings-field-dirty");
+
+        const badges = [
+            `<span class="settings-badge">默认 ${escapeHtml(formatSettingPreview(meta.default))}</span>`,
+            `<code>${escapeHtml(fieldKey)}</code>`,
+        ];
+        if (isSettingDirty(fieldKey)) {
+            badges.unshift('<span class="settings-badge settings-badge-warm">已修改</span>');
+        }
 
         const header = document.createElement("div");
         header.className = "settings-field-header";
         header.innerHTML = `
             <strong>${escapeHtml(meta.description || fieldKey)}</strong>
-            <code>${escapeHtml(fieldKey)}</code>
+            <div class="settings-badges">${badges.join("")}</div>
         `;
 
         const hint = document.createElement("p");
@@ -366,7 +619,6 @@ function renderSettingsForm() {
         elements.settingsForm.appendChild(wrapper);
     });
 }
-
 function renderInlineMarkdown(text) {
     return escapeHtml(text)
         .replace(/`([^`]+)`/g, "<code>$1</code>")
@@ -616,7 +868,7 @@ function renderDiaryDetail(date, content) {
     } else {
         const emptyObservation = cloneEmptyState();
         emptyObservation.querySelector("strong").textContent = "今天没有单独整理观察段落";
-        emptyObservation.querySelector("p").textContent = "如果后续日记模板保持“今日观察”标题，这里会自动拆分展示。";
+        emptyObservation.querySelector("p").textContent = "如果后续日记模板保留“今日观察”标题，这里会自动拆分展示。";
         elements.diaryObservations.innerHTML = "";
         elements.diaryObservations.appendChild(emptyObservation);
         elements.diaryObservations.classList.remove("diary-content-collapsed");
@@ -723,7 +975,7 @@ function renderObservationList() {
                     <span>选择</span>
                 </label>
             </div>
-            <p class="observation-content">${escapeHtml(observation.content || observation.recognition || "暂无内容")}</p>
+            <p class="observation-content">${escapeHtml(observation.content || observation.recognition || "无内容")}</p>
             <div class="observation-footer">
                 <span class="panel-subtle">索引 ${escapeHtml(observation.index)}</span>
                 <button class="danger-button" type="button">删除这条</button>
@@ -818,7 +1070,7 @@ function renderMemories() {
         panel.innerHTML = `
             <div class="panel-header">
                 <h3>${escapeHtml(categoryLabel)}</h3>
-                <span class="panel-subtle">${items.length} 条记忆</span>
+                <span class="panel-subtle">${items.length} 条记录</span>
             </div>
             <div class="memory-list">${list}</div>
         `;
@@ -829,6 +1081,7 @@ function renderMemories() {
 function renderRuntime() {
     const runtime = state.runtime;
     elements.runtimeStats.innerHTML = "";
+    elements.runtimeInsights.innerHTML = "";
     if (!runtime) {
         elements.runtimeMeta.textContent = "尚未加载运行状态。";
         elements.runtimeStats.appendChild(cloneEmptyState());
@@ -845,6 +1098,10 @@ function renderRuntime() {
         ["观察记录", `${runtime.observation_count || 0} 条`],
         ["日记功能", runtime.enable_diary ? "开启" : "关闭"],
         ["学习功能", runtime.enable_learning ? "开启" : "关闭"],
+        ["识屏模式", runtime.use_shared_screenshot_dir ? "共享目录" : "实时截图"],
+        ["求助识屏", formatRuntimeSwitch(runtime.enable_natural_language_screen_assist)],
+        ["窗口陪伴", formatRuntimeSwitch(runtime.enable_window_companion)],
+        ["陪伴目标", runtime.window_companion_active_title || "待命中"],
     ];
 
     cards.forEach(([label, value]) => {
@@ -871,8 +1128,8 @@ function renderRuntime() {
         elements.presetSelect.appendChild(option);
     });
     elements.presetSelect.value = String(runtime.current_preset_index ?? -1);
+    renderRuntimeInsights(runtime);
 }
-
 async function loadConfig() {
     const data = await apiFetch("/api/config");
     elements.pluginVersion.textContent = data.plugin_version || "--";
@@ -883,6 +1140,12 @@ async function loadRuntime() {
     const data = await apiFetch("/api/runtime");
     state.runtime = data.runtime || null;
     renderRuntime();
+}
+
+async function loadHealth() {
+    const data = await apiFetch("/api/health");
+    state.health = data || null;
+    renderHealthChecks();
 }
 
 async function loadSettings() {
@@ -901,8 +1164,14 @@ async function loadSettings() {
     renderSettingsForm();
 }
 
+async function loadWindowCandidates() {
+    const data = await apiFetch("/api/windows");
+    state.windowCandidates = (data.windows || []).filter(Boolean);
+    renderSettingsForm();
+}
+
 async function loadDiaries() {
-    renderLoading(elements.diaryList, "正在整理日记列表…");
+    renderLoading(elements.diaryList, "正在整理日记列表...");
     const data = await apiFetch("/api/diaries");
     state.diaryDates = data.diaries || [];
     if (!state.selectedDiaryDate) {
@@ -914,9 +1183,9 @@ async function loadDiaries() {
 
 async function loadDiaryDetail(date) {
     state.selectedDiaryDate = date;
-    elements.diaryTitle.textContent = "正在载入日记…";
-    renderLoading(elements.diaryReflection, "正在读取日记内容…");
-    renderLoading(elements.diaryObservations, "正在整理观察记录…");
+    elements.diaryTitle.textContent = "正在载入日记...";
+    renderLoading(elements.diaryReflection, "正在读取日记内容...");
+    renderLoading(elements.diaryObservations, "正在整理观察记录...");
     const data = await apiFetch(`/api/diary/${date}`);
     renderDiaryDetail(data.date, data.content || "");
 }
@@ -927,7 +1196,7 @@ async function loadObservationScenes() {
 }
 
 async function loadObservations() {
-    renderLoading(elements.observationList, "正在读取观察记录…");
+    renderLoading(elements.observationList, "正在读取观察记录...");
     const query = new URLSearchParams({
         page: String(state.observationPage),
         limit: String(state.observationLimit),
@@ -948,7 +1217,7 @@ async function loadObservations() {
 }
 
 async function loadMemories() {
-    renderLoading(elements.memoryGroups, "正在检索长期记忆…");
+    renderLoading(elements.memoryGroups, "正在检索长期记忆...");
     const data = await apiFetch("/api/memories");
     state.memories = data.memories || [];
     renderMemories();
@@ -957,6 +1226,7 @@ async function loadMemories() {
 async function refreshActiveSection() {
     await loadConfig();
     await loadRuntime();
+    await loadHealth();
     await loadSettings();
     await loadDiaries();
     await loadObservationScenes();
@@ -1015,12 +1285,12 @@ elements.navLinks.forEach((link) => {
 });
 
 elements.refreshButton.addEventListener("click", async () => {
-    setConnectionState("online", "正在刷新数据…");
+    setConnectionState("online", "正在刷新数据...");
     try {
         await refreshActiveSection();
         setConnectionState("online", "数据已刷新。");
     } catch (error) {
-        setConnectionState("error", `刷新失败: ${error.message}`);
+        setConnectionState("error", `鍒锋柊澶辫触: ${error.message}`);
     }
 });
 
@@ -1087,10 +1357,72 @@ elements.loginForm.addEventListener("submit", async (event) => {
         setConnectionState("online", "登录成功，正在加载数据。");
         await refreshActiveSection();
     } catch (error) {
-        elements.loginError.textContent = `登录失败: ${error.message}`;
+        elements.loginError.textContent = `鐧诲綍澶辫触: ${error.message}`;
     }
 });
 
+elements.settingsHelper.addEventListener("click", async (event) => {
+    const action = event.target.closest("[data-settings-action]")?.dataset.settingsAction;
+    if (!action) return;
+
+    if (action === "open-vision-group") {
+        switchSettingsGroup("vision");
+        return;
+    }
+    if (action === "open-runtime-group") {
+        switchSettingsGroup("runtime");
+        return;
+    }
+    if (action === "open-persona-group") {
+        switchSettingsGroup("persona");
+        return;
+    }
+    if (action === "toggle-screen-assist") {
+        setSettingsValues({
+            enable_natural_language_screen_assist: !Boolean(state.settingsValues.enable_natural_language_screen_assist),
+        });
+        return;
+    }
+    if (action === "vision-live") {
+        setSettingsValues({
+            use_shared_screenshot_dir: false,
+            shared_screenshot_dir: "",
+        });
+        return;
+    }
+    if (action === "vision-docker") {
+        setSettingsValues({
+            use_shared_screenshot_dir: true,
+        });
+        return;
+    }
+    if (action === "toggle-window-companion") {
+        setSettingsValues({
+            enable_window_companion: !Boolean(state.settingsValues.enable_window_companion),
+        });
+        return;
+    }
+    if (action === "load-window-candidates") {
+        elements.settingsFeedback.textContent = "正在读取当前窗口列表...";
+        try {
+            await loadWindowCandidates();
+            elements.settingsFeedback.textContent = state.windowCandidates.length
+                ? "已载入当前窗口列表，点按钮即可加入陪伴目标。"
+                : "没有读取到可用窗口，请确认桌面环境和权限正常。";
+        } catch (error) {
+            elements.settingsFeedback.textContent = `读取窗口失败: ${error.message}`;
+        }
+        return;
+    }
+    if (action.startsWith("window-candidate::")) {
+        const index = Number(action.split("::")[1]);
+        const title = state.windowCandidates[index];
+        appendWindowCompanionTarget(title);
+        elements.settingsFeedback.textContent = title
+            ? `已把“${title}”加入窗口陪伴目标。`
+            : "这个窗口候选已经失效，请重新读取窗口列表。";
+    }
+});
 elements.runtimeForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     elements.runtimeFeedback.textContent = "";
@@ -1149,7 +1481,7 @@ elements.stopTasksButton.addEventListener("click", async () => {
         renderRuntime();
         elements.runtimeFeedback.textContent = "当前自动任务已停止。";
     } catch (error) {
-        elements.runtimeFeedback.textContent = `停止失败: ${error.message}`;
+        elements.runtimeFeedback.textContent = `鍋滄澶辫触: ${error.message}`;
     }
 });
 
@@ -1176,3 +1508,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         setConnectionState("error", `初始化失败: ${error.message}`);
     }
 });
+
+
+
+

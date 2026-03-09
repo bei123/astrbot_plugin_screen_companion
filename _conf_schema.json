@@ -126,8 +126,8 @@
   "image_prompt": {
     "description": "图像识别提示词",
     "type": "text",
-    "hint": "自定义LLM识别图像时的提示词，以获得更好的识别效果。",
-    "default": "请详细分析这张屏幕截图，捕捉以下细节：1. 屏幕上的具体应用程序、窗口和界面元素 2. 用户正在进行的具体操作和任务 3. 屏幕上的详细文字、图片、图标等内容 4. 用户的操作习惯和行为模式 5. 任何可能被忽略的细节信息。请提供详细的分析结果，重点突出用户当前活动的具体细节，以便我能准确了解用户正在做什么。",
+    "hint": "自定义视觉模型识别图片时的提示词。建议优先要求模型输出“任务、阶段、关键线索、建议点”这类高价值信息，并尽量保持简短，以减少 token 消耗。",
+    "default": "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
@@ -167,6 +167,36 @@
     "description": "视觉API模型",
     "type": "string",
     "hint": "外接视觉API使用的模型名称。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "use_external_vision": true
+    }
+  },
+  "vision_api_url_backup": {
+    "description": "备用视觉API地址",
+    "type": "string",
+    "hint": "备用外接视觉API的URL地址，当主API失败时使用。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "use_external_vision": true
+    }
+  },
+  "vision_api_key_backup": {
+    "description": "备用视觉API密钥",
+    "type": "string",
+    "hint": "备用外接视觉API的密钥。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "use_external_vision": true
+    }
+  },
+  "vision_api_model_backup": {
+    "description": "备用视觉API模型",
+    "type": "string",
+    "hint": "备用外接视觉API使用的模型名称。",
     "default": "",
     "condition": {
       "enabled": true,
@@ -393,6 +423,15 @@
     "type": "bool",
     "hint": "如果开启，最近一次截图将保存在 data 目录中。关闭则在发送给 AI 后立即删除，以节省空间。",
     "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "enable_natural_language_screen_assist": {
+    "description": "启用自然语言识屏求助",
+    "type": "bool",
+    "hint": "开启后，用户用自然语言表达“帮我看看屏幕并给建议”时，bot 会主动截图分析并回应。默认关闭，以减少误触。",
+    "default": false,
     "condition": {
       "enabled": true
     }
