@@ -4999,6 +4999,16 @@ class ScreenCompanion(Star):
         self.corrections = {}
         self.corrections_file = os.path.join(self.learning_storage, "corrections.json")
         self._load_corrections()
+        
+        # 窗口变化检测相关
+        self.previous_windows = set()
+        self.window_change_cooldown = 0
+        self.window_timestamps = {}  # 记录窗口首次出现的时间戳
+        
+        # 时间跟踪相关
+        self.current_activity = None  # 当前活动
+        self.activity_start_time = None  # 活动开始时间
+        self.activity_history = []  # 活动历史记录
 
         self.uncertainty_words = ["也许", "可能", "看起来", "我猜", "像是", "大概", "说不定", "似乎"]
 
