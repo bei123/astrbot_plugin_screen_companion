@@ -161,6 +161,7 @@ class ScreenCompanion(Star):
         self._webui_lock = asyncio.Lock()
         self._is_stopping = False
         self._screen_assist_cooldowns = {}
+        self.last_shared_activity_invite_time = 0.0
 
     def _sync_all_config(self) -> None:
         """将配置对象同步到插件运行时字段。"""
@@ -463,7 +464,7 @@ class ScreenCompanion(Star):
             )
         )
 
-        start_response = await self._get_start_response()
+        start_response = await self._get_start_response(target)
         intro = f"检测到《{window_title}》已经打开，我来陪你。"
         await self._send_plain_message(target, f"{intro}\n{start_response}".strip())
         logger.info(f"窗口陪伴已启动: {window_title}")
@@ -500,7 +501,7 @@ class ScreenCompanion(Star):
             self.state = "inactive"
 
         if target and active_title:
-            end_response = await self._get_end_response()
+            end_response = await self._get_end_response(target)
             if reason == "disabled":
                 outro = f"《{active_title}》的窗口陪伴已经关闭，我先退到旁边。"
             else:
@@ -915,6 +916,37 @@ class ScreenCompanion(Star):
         text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
         text = re.sub(r"\s+", " ", text).strip()
         return text
+
+    @staticmethod
+    def _normalize_shared_activity_summary(summary: str) -> str:
+        import re
+
+        summary = str(summary or "").strip()
+        if not summary:
+            return ""
+        summary = re.sub(r"\s+", " ", summary)
+        return summary[:60]
+
+    def _ensure_long_term_memory_defaults(self) -> None:
+        """确保长期记忆结构完整。"""
+        if not isinstance(self.long_term_memory, dict):
+            self.long_term_memory = {}
+
+        self.long_term_memory.setdefault("applications", {})
+        self.long_term_memory.setdefault("scenes", {})
+        self.long_term_memory.setdefault(
+            "user_preferences",
+            {
+                "music": {},
+                "movies": {},
+                "food": {},
+                "hobbies": {},
+                "other": {},
+            },
+        )
+        self.long_term_memory.setdefault("memory_associations", {})
+        self.long_term_memory.setdefault("memory_priorities", {})
+        self.long_term_memory.setdefault("shared_activities", {})
 
     def _is_low_value_record_text(self, text: str) -> bool:
         normalized = self._normalize_record_text(text)
@@ -1364,6 +1396,7 @@ class ScreenCompanion(Star):
         memory = getattr(self, "long_term_memory", None)
         if not isinstance(memory, dict):
             return
+        self._ensure_long_term_memory_defaults()
 
         # 保留 self_image 记忆
         self_image_memory = memory.get("self_image", [])
@@ -1441,6 +1474,22 @@ class ScreenCompanion(Star):
                     score_keys=("priority", "count"),
                 )
             memory["user_preferences"] = cleaned_preferences
+
+        shared_activities = memory.get("shared_activities", {})
+        if isinstance(shared_activities, dict):
+            cleaned_shared_activities = {}
+            for activity_name, data in shared_activities.items():
+                normalized_activity = self._normalize_shared_activity_summary(activity_name)
+                if not normalized_activity:
+                    continue
+                activity_data = dict(data or {})
+                activity_data["category"] = str(activity_data.get("category", "other") or "other")
+                cleaned_shared_activities[normalized_activity] = activity_data
+            memory["shared_activities"] = self._limit_ranked_dict_items(
+                cleaned_shared_activities,
+                limit=60,
+                score_keys=("priority", "count"),
+            )
         
         # 恢复 self_image 记忆
         if self_image_memory:
@@ -1455,22 +1504,7 @@ class ScreenCompanion(Star):
         scene = self._normalize_scene_label(scene)
         active_window = self._normalize_window_title(active_window)
 
-        if "applications" not in self.long_term_memory:
-            self.long_term_memory["applications"] = {}
-        if "scenes" not in self.long_term_memory:
-            self.long_term_memory["scenes"] = {}
-        if "user_preferences" not in self.long_term_memory:
-            self.long_term_memory["user_preferences"] = {
-                "music": {},
-                "movies": {},
-                "food": {},
-                "hobbies": {},
-                "other": {}
-            }
-        if "memory_associations" not in self.long_term_memory:
-            self.long_term_memory["memory_associations"] = {}
-        if "memory_priorities" not in self.long_term_memory:
-            self.long_term_memory["memory_priorities"] = {}
+        self._ensure_long_term_memory_defaults()
 
         app_name = active_window.split(" - ")[-1] if " - " in active_window else active_window
         app_name = self._normalize_window_title(app_name)
@@ -1588,6 +1622,25 @@ class ScreenCompanion(Star):
                 if not preferences:
                     del self.long_term_memory["user_preferences"][category]
 
+        if "shared_activities" in self.long_term_memory:
+            for activity_name, activity_data in list(self.long_term_memory["shared_activities"].items()):
+                last_shared = str(activity_data.get("last_shared", "") or "").strip()
+                if not last_shared:
+                    continue
+                try:
+                    last_shared_date = datetime.date.fromisoformat(last_shared)
+                except ValueError:
+                    continue
+
+                days_since_shared = (today - last_shared_date).days
+                if days_since_shared > 0:
+                    decay_factor = 0.97 ** days_since_shared
+                    activity_data["count"] = int(activity_data.get("count", 0) * decay_factor)
+                    activity_data["priority"] = int(activity_data.get("priority", 0) * decay_factor)
+
+                    if activity_data["count"] < 1:
+                        del self.long_term_memory["shared_activities"][activity_name]
+
     def _build_memory_associations(self, scene, app_name):
         """建立场景与应用之间的记忆关联。"""
         import datetime
@@ -1661,6 +1714,22 @@ class ScreenCompanion(Star):
                     priority = data["count"] * (1 / (1 + days_since_mentioned))
                     data["priority"] = int(priority)
 
+        if "shared_activities" in self.long_term_memory:
+            for activity_name, data in self.long_term_memory["shared_activities"].items():
+                last_shared = str(data.get("last_shared", "") or "").strip()
+                if not last_shared:
+                    data["priority"] = int(data.get("count", 0) or 0)
+                    continue
+                try:
+                    last_shared_date = datetime.date.fromisoformat(last_shared)
+                except ValueError:
+                    data["priority"] = int(data.get("count", 0) or 0)
+                    continue
+
+                days_since_shared = (today - last_shared_date).days
+                priority = data.get("count", 0) * (1 / (1 + days_since_shared))
+                data["priority"] = int(priority)
+
     def _trigger_related_memories(self, scene, app_name):
         """触发与当前场景相关的记忆。"""
         related_memories = []
@@ -1694,7 +1763,7 @@ class ScreenCompanion(Star):
                 for pref, data in top_prefs:
                     if data["priority"] > 0:
                         related_memories.append(f"偏好: {category} - {pref} (优先级 {data['priority']})")
-        
+
         return related_memories
 
     def _add_user_preference(self, category, preference):
@@ -1729,6 +1798,223 @@ class ScreenCompanion(Star):
         self._save_long_term_memory()
         
         logger.info(f"已添加用户偏好: {category} - {preference}")
+
+    @staticmethod
+    def _shared_activity_category_label(category: str) -> str:
+        labels = {
+            "watch_media": "一起看过",
+            "game": "一起玩过",
+            "test": "一起做过测试",
+            "screen_interaction": "一起进行过识屏互动",
+            "other": "一起做过",
+        }
+        return labels.get(str(category or "other"), "一起做过")
+
+    def _get_relevant_shared_activities(self, scene: str, limit: int = 3) -> list[tuple[str, dict]]:
+        shared_activities = self.long_term_memory.get("shared_activities", {})
+        if not isinstance(shared_activities, dict) or not shared_activities:
+            return []
+
+        scene = self._normalize_scene_label(scene)
+        category_map = {
+            "视频": {"watch_media", "screen_interaction"},
+            "阅读": {"watch_media", "screen_interaction", "test"},
+            "游戏": {"game", "screen_interaction"},
+            "学习": {"test", "screen_interaction"},
+            "浏览": {"watch_media", "screen_interaction", "test"},
+            "浏览-娱乐": {"watch_media", "game", "screen_interaction"},
+            "社交": {"screen_interaction"},
+        }
+        wanted_categories = category_map.get(scene, set())
+
+        ranked_items = sorted(
+            shared_activities.items(),
+            key=lambda item: (
+                int((item[1] or {}).get("priority", 0) or 0),
+                int((item[1] or {}).get("count", 0) or 0),
+                str((item[1] or {}).get("last_shared", "") or ""),
+            ),
+            reverse=True,
+        )
+
+        matched = []
+        fallback = []
+        for activity_name, data in ranked_items:
+            if not isinstance(data, dict):
+                continue
+            if int(data.get("priority", 0) or 0) <= 0 and int(data.get("count", 0) or 0) <= 0:
+                continue
+            item = (activity_name, data)
+            if wanted_categories and str(data.get("category", "other") or "other") in wanted_categories:
+                matched.append(item)
+            else:
+                fallback.append(item)
+
+        picked = matched[:limit]
+        if len(picked) < limit:
+            picked.extend(fallback[: max(0, limit - len(picked))])
+        return picked[:limit]
+
+    def _should_offer_shared_activity_invite(self, scene: str, custom_prompt: str = "") -> bool:
+        leisure_scenes = {"视频", "阅读", "游戏", "音乐", "社交", "浏览", "浏览-娱乐"}
+        if custom_prompt:
+            return False
+        if scene not in leisure_scenes and not self.long_term_memory.get("shared_activities"):
+            return False
+
+        now_ts = time.time()
+        if now_ts - float(getattr(self, "last_shared_activity_invite_time", 0.0) or 0.0) < 7200:
+            return False
+
+        self.last_shared_activity_invite_time = now_ts
+        return True
+
+    def _extract_shared_activity_from_message(self, message_text: str) -> tuple[str, str] | tuple[None, None]:
+        import re
+
+        text = str(message_text or "").strip()
+        if not text or text.startswith("/"):
+            return None, None
+
+        escaped_bot_name = re.escape(str(getattr(self, "bot_name", "") or "").strip())
+        together_patterns = [
+            r"和你",
+            r"跟你",
+            r"我们一起",
+            r"咱们一起",
+            r"你刚刚陪我",
+            r"你刚刚帮我",
+            r"你陪我",
+            r"你帮我",
+        ]
+        if escaped_bot_name:
+            together_patterns.extend(
+                [
+                    rf"和{escaped_bot_name}",
+                    rf"跟{escaped_bot_name}",
+                    rf"{escaped_bot_name}陪我",
+                    rf"{escaped_bot_name}帮我",
+                ]
+            )
+
+        if not any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in together_patterns):
+            return None, None
+
+        future_only_markers = (
+            "想和你一起",
+            "想跟你一起",
+            "要不要一起",
+            "一起吗",
+            "改天一起",
+            "下次一起",
+            "等会一起",
+            "待会一起",
+        )
+        past_markers = ("刚", "刚刚", "已经", "过", "了", "完", "通关")
+        if any(marker in text for marker in future_only_markers) and not any(
+            marker in text for marker in past_markers
+        ):
+            return None, None
+
+        title_match = re.search(r"《[^》]{1,30}》", text)
+        title = title_match.group(0) if title_match else ""
+
+        watch_ready = re.search(r"(看|追|补|刷).{0,12}(过|了|完|完了)", text)
+        game_ready = re.search(r"(玩|打|开黑|跑团|通关).{0,12}(过|了|完|通关)", text)
+        test_ready = re.search(r"(做|测|试).{0,12}(过|了|完)", text)
+        screen_ready = re.search(
+            r"(看|分析|研究|判断|排查).{0,12}(过|了|完)",
+            text,
+        )
+
+        watch_keywords = ("电影", "动漫", "番", "动画", "剧", "视频", "纪录片", "直播")
+        if watch_ready and (title or any(keyword in text for keyword in watch_keywords)):
+            if title:
+                return "watch_media", f"一起看{title}"
+            media_summary_map = {
+                "电影": "一起看电影",
+                "动漫": "一起看动漫",
+                "番": "一起看动漫",
+                "动画": "一起看动漫",
+                "剧": "一起追剧",
+                "纪录片": "一起看纪录片",
+                "直播": "一起看直播",
+                "视频": "一起看视频",
+            }
+            for keyword, summary in media_summary_map.items():
+                if keyword in text:
+                    return "watch_media", summary
+
+        game_keywords = ("游戏", "开黑", "这局", "这一局")
+        if game_ready and (title or any(keyword in text for keyword in game_keywords)):
+            if title:
+                return "game", f"一起玩{title}"
+            if "开黑" in text:
+                return "game", "一起开黑"
+            if "这局" in text or "这一局" in text:
+                return "game", "一起打这局游戏"
+            return "game", "一起玩游戏"
+
+        topic_match = re.search(r"([\u4e00-\u9fffA-Za-z0-9]{2,24}测试)", text)
+        if test_ready and any(keyword in text for keyword in ("测试", "测评", "题", "问卷", "人格")):
+            if topic_match:
+                return "test", f"一起做{topic_match.group(1)}"
+            if "人格" in text:
+                return "test", "一起做人格测试"
+            return "test", "一起做测试"
+
+        screen_keywords = {
+            "这题": "一起看这道题",
+            "这道题": "一起看这道题",
+            "这个页面": "一起看这个页面",
+            "这个界面": "一起看这个界面",
+            "这个截图": "一起看这个截图",
+            "这张图": "一起看这张图",
+            "这局": "一起看这局",
+            "这一局": "一起看这局",
+            "这个弹窗": "一起看这个弹窗",
+        }
+        if screen_ready:
+            for keyword, summary in screen_keywords.items():
+                if keyword in text:
+                    return "screen_interaction", summary
+
+        return None, None
+
+    def _remember_shared_activity(self, category: str, summary: str, source_text: str = "") -> bool:
+        import datetime
+
+        normalized_summary = self._normalize_shared_activity_summary(summary)
+        if not normalized_summary:
+            return False
+
+        self._ensure_long_term_memory_defaults()
+        today = datetime.date.today().isoformat()
+        activity_memory = self.long_term_memory["shared_activities"].setdefault(
+            normalized_summary,
+            {
+                "category": str(category or "other"),
+                "count": 0,
+                "last_shared": today,
+                "priority": 0,
+            },
+        )
+        activity_memory["category"] = str(category or activity_memory.get("category", "other") or "other")
+        activity_memory["count"] = int(activity_memory.get("count", 0) or 0) + 1
+        activity_memory["last_shared"] = today
+        if source_text:
+            activity_memory["example"] = str(source_text).strip()[:120]
+
+        self._update_memory_priorities()
+        self._save_long_term_memory()
+        logger.info(f"已记录共同经历: {normalized_summary}")
+        return True
+
+    def _learn_shared_activity_from_message(self, message_text: str) -> bool:
+        category, summary = self._extract_shared_activity_from_message(message_text)
+        if not category or not summary:
+            return False
+        return self._remember_shared_activity(category, summary, source_text=message_text)
 
     def _update_activity(self, scene, active_window):
         """更新活动状态，记录工作/摸鱼时间。"""
@@ -1999,6 +2285,8 @@ class ScreenCompanion(Star):
             if companion_prompt:
                 companion_supplemental_guide = (
                     "\n\n额外要求：保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。"
+                    "你可以偶尔轻轻表达自己也想和用户一起看点内容、玩一局游戏或做个小测试，"
+                    "但必须低频、自然，不要打断正事，更不能凭空捏造共同经历。"
                 )
                 return f"{companion_prompt.rstrip()}{companion_supplemental_guide}"
 
@@ -2013,11 +2301,32 @@ class ScreenCompanion(Star):
         supplemental_guide = (
             "\n\n额外要求：少用旁白式开场，不要总是先叫用户名字。"
             "如果能提出建议，优先给和当前任务直接相关、能立刻用上的建议。"
+            "可以偶尔表达自己也想和用户一起做点什么，但只限轻松自然的一句，"
+            "并且任何共同经历都只能基于当前对话或已记录内容，不能虚构。"
         )
 
         return f"{base_prompt.rstrip()}{supplemental_guide}"
 
-    async def _get_start_response(self) -> str:
+    def _build_start_end_prompt(self, raw_prompt: str, action: str) -> str:
+        """为开始/结束消息补充更明确的人格化约束。"""
+        base_prompt = str(raw_prompt or "").strip()
+        if not base_prompt:
+            if action == "start":
+                base_prompt = "以你的性格向用户表达你会开始偶尔地陪着用户看屏幕了。"
+            else:
+                base_prompt = "以你的性格向用户表达你会先暂停看屏幕、退到旁边等用户再叫你。"
+
+        supplemental = (
+            "\n额外要求："
+            "回复必须明显带有人格，不要像系统提示、状态播报或功能开关通知。"
+            "语气要自然、亲近、有人味，像这个角色本人在开口。"
+            "避免使用“已开始”“已停止”“任务已启动”“任务已结束”这种机械措辞。"
+            "尽量简短，控制在 1 到 2 句话内。"
+            "允许有一点角色感、小情绪或亲昵感，但不要夸张，也不要说得像说明书。"
+        )
+        return f"{base_prompt.rstrip()}{supplemental}"
+
+    async def _get_start_response(self, umo: str = None) -> str:
         """Build the startup reply text."""
         mode = "llm" if self.use_llm_for_start_end else "preset"
         if mode == "preset" or (hasattr(mode, 'value') and mode.value == "preset"):
@@ -2026,8 +2335,11 @@ class ScreenCompanion(Star):
             provider = self.context.get_using_provider()
             if provider:
                 try:
-                    system_prompt = await self._get_persona_prompt()
-                    prompt = self.start_llm_prompt
+                    system_prompt = await self._get_persona_prompt(umo)
+                    prompt = self._build_start_end_prompt(
+                        self.start_llm_prompt,
+                        action="start",
+                    )
                     response = await asyncio.wait_for(
                         provider.text_chat(prompt=prompt, system_prompt=system_prompt),
                         timeout=60.0
@@ -2040,7 +2352,7 @@ class ScreenCompanion(Star):
                     logger.warning(f"Operation warning: {e}")
             return "我先退到旁边了，有需要再叫我。"
 
-    async def _get_end_response(self) -> str:
+    async def _get_end_response(self, umo: str = None) -> str:
         """生成结束陪伴时的回复。"""
         mode = "llm" if self.use_llm_for_start_end else "preset"
         if mode == "preset" or (hasattr(mode, 'value') and mode.value == "preset"):
@@ -2049,8 +2361,11 @@ class ScreenCompanion(Star):
             provider = self.context.get_using_provider()
             if provider:
                 try:
-                    system_prompt = await self._get_persona_prompt()
-                    prompt = self.end_llm_prompt
+                    system_prompt = await self._get_persona_prompt(umo)
+                    prompt = self._build_start_end_prompt(
+                        self.end_llm_prompt,
+                        action="end",
+                    )
                     response = await asyncio.wait_for(
                         provider.text_chat(prompt=prompt, system_prompt=system_prompt),
                         timeout=60.0
@@ -2987,6 +3302,16 @@ class ScreenCompanion(Star):
                     memory_text += f"\n- {memory}"
                 interaction_prompt += memory_text
 
+            shared_activities = self._get_relevant_shared_activities(scene, limit=3)
+            if shared_activities:
+                shared_text = "\n用户明确提过的共同经历："
+                for activity_name, activity_data in shared_activities:
+                    shared_text += (
+                        f"\n- {self._shared_activity_category_label(activity_data.get('category', 'other'))}: "
+                        f"{activity_name}（最近一次 {activity_data.get('last_shared', '未知')}）"
+                    )
+                interaction_prompt += shared_text
+
             # 最近观察记录（上下文）
             if self.observations:
                 recent_observations = self.observations[-3:][::-1]  # 减少观察记录数量
@@ -3029,6 +3354,16 @@ class ScreenCompanion(Star):
                 custom_prompt=custom_prompt,
                 context_count=len(contexts),
             )
+
+            if self._should_offer_shared_activity_invite(scene, custom_prompt):
+                interaction_prompt += (
+                    "\n- 如果当前是轻松场景，而且不打扰用户，你可以偶尔用一句低压力的话，"
+                    "表达自己也想和用户一起看电影/动漫、玩一局游戏、做个小测试，"
+                    "或者继续当前这类依赖识屏的互动。"
+                    "\n- 这种提议最多一句，像同伴随口说出来的想法，不要每次都提。"
+                    "\n- 如果引用共同经历，只能引用上面已经记录过的内容；没有记录就只说当前这一刻的想法。"
+                    "\n- 如果眼前任务更需要直接帮助，就优先帮助，不要硬转成邀约。"
+                )
 
             # 场景特定建议（针对性指导）
             if scene in ("视频", "阅读"):
@@ -3193,6 +3528,17 @@ class ScreenCompanion(Star):
             logger.error(traceback.format_exc())
             yield event.plain_result("这次处理失败了，我先缓一口气，你可以再试一次。")
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=0)
+    async def on_shared_activity_memory(self, event: AstrMessageEvent):
+        """从用户明确提到的共同经历里学习。"""
+        try:
+            message_text = str(getattr(event, "message_str", "") or "").strip()
+            if not message_text or message_text.startswith("/"):
+                return
+            self._learn_shared_activity_from_message(message_text)
+        except Exception as e:
+            logger.debug(f"记录共同经历失败: {e}")
+
     @filter.event_message_type(filter.EventMessageType.ALL, priority=1)
     async def on_natural_language_screen_assist(self, event: AstrMessageEvent):
         """处理自然语言触发的识屏求助。"""
@@ -3276,7 +3622,7 @@ class ScreenCompanion(Star):
 
             self.auto_tasks.clear()
             logger.info("所有自动观察任务已停止")
-            end_response = await self._get_end_response()
+            end_response = await self._get_end_response(event.unified_msg_origin)
             yield event.plain_result(end_response)
         else:
             # 启动自动观察
@@ -3303,7 +3649,7 @@ class ScreenCompanion(Star):
             self.auto_tasks[self.AUTO_TASK_ID] = asyncio.create_task(
                 self._auto_screen_task(event, task_id=self.AUTO_TASK_ID)
             )
-            start_response = await self._get_start_response()
+            start_response = await self._get_start_response(event.unified_msg_origin)
             yield event.plain_result(start_response)
 
     @filter.command_group("kpi")
@@ -3365,7 +3711,7 @@ class ScreenCompanion(Star):
         self.auto_tasks[self.AUTO_TASK_ID] = asyncio.create_task(
             self._auto_screen_task(event, task_id=self.AUTO_TASK_ID)
         )
-        start_response = await self._get_start_response()
+        start_response = await self._get_start_response(event.unified_msg_origin)
         yield event.plain_result(f"已启动自动观察任务 {self.AUTO_TASK_ID}。\n{start_response}")
 
     @kpi_group.command("stop")
@@ -3407,7 +3753,7 @@ class ScreenCompanion(Star):
             
             self.is_running = False
             self.state = "inactive"
-            end_response = await self._get_end_response()
+            end_response = await self._get_end_response(event.unified_msg_origin)
             yield event.plain_result(f"已停止所有自动观察任务。\n{end_response}")
 
     @filter.command("webui")
@@ -5533,11 +5879,3 @@ class ScreenCompanion(Star):
             segments.append(current_segment)
 
         return segments
-
-
-
-
-
-
-
-

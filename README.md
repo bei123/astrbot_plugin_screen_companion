@@ -2,6 +2,10 @@
 
 面向 AstrBot 的屏幕伴侣插件。它会结合截图分析、环境感知、长期记忆、日记记录和 WebUI，为用户提供更自然、更有价值的陪伴式互动体验。
 
+<br />
+
+明天给大女儿过生日，应该不会更新。
+
 ## 主要功能
 
 - **自动截图观察**：按设定间隔和触发概率分析当前屏幕
@@ -37,19 +41,19 @@
 git clone https://github.com/menglimi/astrbot_plugin_screen_companion.git
 ```
 
-2. 将插件目录放入 AstrBot 插件目录，例如：
+1. 将插件目录放入 AstrBot 插件目录，例如：
 
 ```text
 C:\Users\你的用户名\.astrbot\data\plugins\
 ```
 
-3. 安装依赖
+1. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-4. 重启 AstrBot
+1. 重启 AstrBot
 
 ## 依赖
 
@@ -66,11 +70,13 @@ pip install -r requirements.txt
 ## 观察模式
 
 ### 偷看模式
+
 - 系统默认模式
 - 适用于偶尔观察用户屏幕的场景
 - 提供简洁、客观的屏幕分析
 
 ### 陪伴模式
+
 - 更注重对话的连续性和陪伴的沉浸感
 - 为特定窗口提供专属陪伴
 - 提供更贴心的建议和鼓励
@@ -78,23 +84,23 @@ pip install -r requirements.txt
 
 ## 常用指令
 
-| 指令 | 说明 |
-| --- | --- |
-| `/kp` | 立即截图并分析当前屏幕 |
-| `/kps` | 切换自动观察状态 |
-| `/kpi start` | 启动自动观察任务 |
-| `/kpi stop` | 停止自动观察任务 |
-| `/kpi list` | 查看当前运行中的自动任务 |
-| `/kpi y [序号] [间隔] [概率]` | 新增或修改自定义预设 |
-| `/kpi ys [序号]` | 切换到指定预设 |
-| `/kpi presets` | 查看全部预设 |
-| `/kpi add [间隔] [提示词]` | 新增一个自定义观察任务 |
-| `/kpi diary [YYYY-MM-DD]` | 查看指定日期日记 |
-| `/kpi recent [天数]` | 查看最近几天日记 |
-| `/kpi complete [YYYY-MM-DD]` | 补写指定日期日记 |
-| `/kpi debug [on/off]` | 切换调试模式 |
-| `/kpi webui [start/stop]` | 启动或停止 WebUI |
-| `/kpi webui` | 查看 WebUI 端口信息 |
+| 指令                           | 说明            |
+| ---------------------------- | ------------- |
+| `/kp`                        | 立即截图并分析当前屏幕   |
+| `/kps`                       | 切换自动观察状态      |
+| `/kpi start`                 | 启动自动观察任务      |
+| `/kpi stop`                  | 停止自动观察任务      |
+| `/kpi list`                  | 查看当前运行中的自动任务  |
+| `/kpi y [序号] [间隔] [概率]`      | 新增或修改自定义预设    |
+| `/kpi ys [序号]`               | 切换到指定预设       |
+| `/kpi presets`               | 查看全部预设        |
+| `/kpi add [间隔] [提示词]`        | 新增一个自定义观察任务   |
+| `/kpi diary [YYYY-MM-DD]`    | 查看指定日期日记      |
+| `/kpi recent [天数]`           | 查看最近几天日记      |
+| `/kpi complete [YYYY-MM-DD]` | 补写指定日期日记      |
+| `/kpi debug [on/off]`        | 切换调试模式        |
+| `/kpi webui [start/stop]`    | 启动或停止 WebUI   |
+| `/kpi webui`                 | 查看 WebUI 端口信息 |
 
 ## 外部 API 调用
 
@@ -115,11 +121,13 @@ POST /api/analyze
 ```
 
 **请求参数**：
+
 - `file`：要分析的图片文件
 - `prompt`：可选，自定义提示词
 - `scene`：可选，指定场景类型
 
 **响应**：
+
 - `success`：布尔值，表示请求是否成功
 - `result`：分析结果
 - `error`：错误信息（如果失败）
@@ -131,11 +139,13 @@ POST /api/analyze/base64
 ```
 
 **请求参数**：
+
 - `image`：Base64 编码的图片数据
 - `prompt`：可选，自定义提示词
 - `scene`：可选，指定场景类型
 
 **响应**：
+
 - `success`：布尔值，表示请求是否成功
 - `result`：分析结果
 - `error`：错误信息（如果失败）
@@ -147,6 +157,7 @@ GET /api/activity
 ```
 
 **响应**：
+
 - `success`：布尔值，表示请求是否成功
 - `data`：活动统计数据
   - `work_time`：工作时间（分钟）
@@ -172,24 +183,23 @@ POST /api/auth/login
 ```
 
 **请求参数**：
+
 - `username`：用户名（固定为 `admin`）
 - `password`：WebUI 密码
 
 **响应**：
+
 - `success`：布尔值，表示登录是否成功
 - `token`：认证令牌（如果成功）
 - `error`：错误信息（如果失败）
 
-## 2.5.2 更新摘要
+## 2.5.3 更新摘要
 
-- **新增错误纠正和记忆**：实现了错误纠正和持续性记忆功能，使 Bot 能够从用户的纠正中学习
-- **新增自我形象识别**：实现了自我形象识别和记忆，使 Bot 能够认出屏幕中的自己
-- **新增 webui 命令**：实现了 `webui` 命令来返回端口信息
-- **修复 WebUI 错误**：修复了 "TCPSite.__init__() got an unexpected keyword argument 'sock'" 错误
-- **修复编码错误**：修复了 "charset must not be in content_type argument" 和 "json_response() got an unexpected keyword argument 'charset'" 错误
-- **优化提示词系统**：优化了 `_build_vision_prompt` 方法，按重要性排序组织提示词，以降低 LLM 反应时间
-- **更新默认端口**：将默认端口从 8898 更新到 6314
-- **优化端口管理**：减少了自动切换端口的次数从 10 到 3
+- **新增共同经历记忆**：Bot 现在会记录用户明确提到的“和 Bot 一起看过/玩过/做过”的共同经历，并在后续互动中谨慎引用
+- **升级统计看板**：WebUI 新增表格化统计看板，集中展示活动时间、观察场景、记忆分类和高优先级记忆
+- **新增时间范围筛选**：统计看板支持今天、近 7 天、近 30 天、全部时间，以及自定义起止日期
+- **优化开始/结束回复**：开始和结束任务的 LLM 回复会更明确地应用人格约束，减少机械式播报感
+- **统一版本信息**：插件元数据、WebUI 配置接口和健康检查接口统一更新到 `2.5.3`
 
 ## 2.5.1 更新摘要
 
@@ -268,6 +278,8 @@ python scripts/check_text_health.py --strict
 ## 开发者信息
 
 开发者：menglimi（烛雨）
+
 qq：995051631
+
 写点什么：什么什么什么
-喜欢的话可以给我点个小星星,有好的建议可以告诉我
+    喜欢的话可以给我点个小星星,有好的建议可以告诉我

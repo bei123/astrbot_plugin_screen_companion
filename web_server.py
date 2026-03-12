@@ -2,7 +2,8 @@ import asyncio
 import time
 import os
 import uuid
-from datetime import datetime
+from collections import defaultdict
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +169,7 @@ class WebServer:
                 or path.startswith("/api/observations")  # 允许无需认证访问观察记录
                 or path.startswith("/api/memories")  # 允许无需认证访问记忆
                 or path.startswith("/api/windows")  # 允许无需认证访问窗口列表
+                or path.startswith("/api/dashboard")  # 允许无需认证访问统计面板
             ):
                 return await handler(request)
 
@@ -220,6 +222,7 @@ class WebServer:
         self.app.router.add_post("/api/runtime/stop", self.handle_stop_runtime_tasks)
         self.app.router.add_get("/api/windows", self.handle_list_windows)
         self.app.router.add_get("/api/activity", self.handle_get_activity_stats)
+        self.app.router.add_get("/api/dashboard", self.handle_get_dashboard_stats)
         
         # 外部图片分析API
         self.app.router.add_post("/api/analyze", self.handle_analyze_image)
@@ -542,6 +545,295 @@ class WebServer:
             logger.error(f"Error getting diary: {e}")
             return self._err(str(e))
 
+    @staticmethod
+    def _format_duration(seconds: float | int) -> str:
+        total_seconds = max(0, int(seconds or 0))
+        return f"{int(total_seconds // 60)}分{int(total_seconds % 60)}秒"
+
+    @staticmethod
+    def _build_custom_dashboard_range(start_date: str, end_date: str) -> dict[str, Any] | None:
+        start_text = str(start_date or "").strip()
+        end_text = str(end_date or "").strip()
+        if not start_text or not end_text:
+            return None
+
+        try:
+            start_day = datetime.strptime(start_text, "%Y-%m-%d").date()
+            end_day = datetime.strptime(end_text, "%Y-%m-%d").date()
+        except Exception:
+            return None
+
+        if start_day > end_day:
+            start_day, end_day = end_day, start_day
+
+        start_dt = datetime.combine(start_day, datetime.min.time())
+        end_dt_exclusive = datetime.combine(end_day + timedelta(days=1), datetime.min.time())
+        return {
+            "key": "custom",
+            "label": f"{start_text} 至 {end_text}",
+            "start_datetime": start_dt,
+            "end_datetime_exclusive": end_dt_exclusive,
+            "start_date": start_day,
+            "end_date": end_day,
+            "start_timestamp": start_dt.timestamp(),
+            "end_timestamp_exclusive": end_dt_exclusive.timestamp(),
+        }
+
+    @staticmethod
+    def _get_dashboard_range(range_key: str, start_date: str = "", end_date: str = "") -> dict[str, Any]:
+        normalized = str(range_key or "30d").strip().lower()
+        if normalized == "custom":
+            custom_range = WebServer._build_custom_dashboard_range(start_date, end_date)
+            if custom_range:
+                return custom_range
+            normalized = "30d"
+        now_dt = datetime.now()
+        today_start = datetime.combine(now_dt.date(), datetime.min.time())
+        range_map = {
+            "today": {
+                "key": "today",
+                "label": "今天",
+                "start_datetime": today_start,
+                "end_datetime_exclusive": None,
+                "start_date": today_start.date(),
+                "end_date": None,
+                "start_timestamp": today_start.timestamp(),
+                "end_timestamp_exclusive": None,
+            },
+            "7d": {
+                "key": "7d",
+                "label": "近 7 天",
+                "start_datetime": now_dt - timedelta(days=7),
+                "end_datetime_exclusive": None,
+                "start_date": (now_dt - timedelta(days=7)).date(),
+                "end_date": None,
+                "start_timestamp": (now_dt - timedelta(days=7)).timestamp(),
+                "end_timestamp_exclusive": None,
+            },
+            "30d": {
+                "key": "30d",
+                "label": "近 30 天",
+                "start_datetime": now_dt - timedelta(days=30),
+                "end_datetime_exclusive": None,
+                "start_date": (now_dt - timedelta(days=30)).date(),
+                "end_date": None,
+                "start_timestamp": (now_dt - timedelta(days=30)).timestamp(),
+                "end_timestamp_exclusive": None,
+            },
+            "all": {
+                "key": "all",
+                "label": "全部时间",
+                "start_datetime": None,
+                "end_datetime_exclusive": None,
+                "start_date": None,
+                "end_date": None,
+                "start_timestamp": None,
+                "end_timestamp_exclusive": None,
+            },
+        }
+        return range_map.get(normalized, range_map["30d"])
+
+    @staticmethod
+    def _parse_iso_datetime(value: Any) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone().replace(tzinfo=None)
+            return parsed
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_iso_date(value: Any):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text).date()
+        except Exception:
+            try:
+                return datetime.strptime(text, "%Y-%m-%d").date()
+            except Exception:
+                return None
+
+    def _is_iso_datetime_in_range(self, value: Any, range_info: dict[str, Any]) -> bool:
+        parsed = self._parse_iso_datetime(value)
+        if not parsed:
+            return False
+        start_dt = range_info.get("start_datetime")
+        end_dt_exclusive = range_info.get("end_datetime_exclusive")
+        if start_dt is not None and parsed < start_dt:
+            return False
+        if end_dt_exclusive is not None and parsed >= end_dt_exclusive:
+            return False
+        return True
+
+    def _is_iso_date_in_range(self, value: Any, range_info: dict[str, Any]) -> bool:
+        parsed = self._parse_iso_date(value)
+        if not parsed:
+            return False
+        start_date = range_info.get("start_date")
+        end_date = range_info.get("end_date")
+        if start_date is not None and parsed < start_date:
+            return False
+        if end_date is not None and parsed > end_date:
+            return False
+        return True
+
+    def _collect_formatted_observations(self) -> list[dict[str, Any]]:
+        observations = []
+        for index, obs in enumerate((getattr(self.plugin, "observations", []) or []).copy()):
+            scene_name = str(obs.get("scene", "") or "").strip()
+            if scene_name.lower() in {"unknown", "none", "null"} or scene_name == "鏈煡":
+                scene_name = ""
+
+            active_window = str(
+                obs.get("active_window")
+                or obs.get("window_title")
+                or ""
+            ).strip()
+            if active_window.lower() in {"unknown", "none", "null"} or active_window in {"??", "?????"}:
+                active_window = ""
+
+            content = str(
+                obs.get("content")
+                or obs.get("description")
+                or obs.get("recognition")
+                or ""
+            ).strip()
+
+            time_period = ""
+            timestamp = obs.get("timestamp", "")
+            if timestamp:
+                try:
+                    if "T" in timestamp:
+                        hour = int(timestamp.split("T")[1].split(":")[0])
+                        if 0 <= hour < 6:
+                            time_period = "凌晨"
+                        elif 6 <= hour < 12:
+                            time_period = "上午"
+                        elif 12 <= hour < 18:
+                            time_period = "下午"
+                        else:
+                            time_period = "晚上"
+                except Exception:
+                    pass
+
+            observations.append(
+                {
+                    "index": index,
+                    **obs,
+                    "scene": scene_name,
+                    "active_window": active_window,
+                    "content": content,
+                    "time_period": time_period,
+                }
+            )
+
+        return observations
+
+    def _collect_memory_records(self) -> list[dict[str, Any]]:
+        memories = []
+        if hasattr(self.plugin, "_clean_long_term_memory_noise"):
+            self.plugin._clean_long_term_memory_noise()
+        long_term_memory = getattr(self.plugin, "long_term_memory", {}) or {}
+
+        applications = long_term_memory.get("applications", {})
+        for app_name, data in applications.items():
+            scenes = data.get("scenes", {}) or {}
+            top_scenes = sorted(scenes.items(), key=lambda item: item[1], reverse=True)[:3]
+            scene_summary = "、".join(name for name, _ in top_scenes) if top_scenes else ""
+            memories.append(
+                {
+                    "category": "applications",
+                    "category_label": "常用应用",
+                    "title": app_name,
+                    "summary": f"出现 {int(data.get('usage_count', 0) or 0)} 次",
+                    "meta": f"最近使用: {data.get('last_used', '未知')} | 关联场景: {scene_summary or '暂无'}",
+                    "priority": data.get("priority", 0),
+                    "last_date": data.get("last_used", ""),
+                }
+            )
+
+        scenes = long_term_memory.get("scenes", {})
+        for scene_name, data in scenes.items():
+            memories.append(
+                {
+                    "category": "scenes",
+                    "category_label": "高频场景",
+                    "title": scene_name,
+                    "summary": f"出现 {int(data.get('count', 0) or 0)} 次",
+                    "meta": f"最近出现: {data.get('last_used', '未知')}",
+                    "priority": data.get("priority", 0),
+                    "last_date": data.get("last_used", ""),
+                }
+            )
+
+        user_preferences = long_term_memory.get("user_preferences", {})
+        for category, preferences in user_preferences.items():
+            for pref_name, data in preferences.items():
+                memories.append(
+                    {
+                        "category": "preferences",
+                        "category_label": "用户偏好",
+                        "title": pref_name,
+                        "summary": f"记录于 {category}",
+                        "meta": f"最近提及: {data.get('last_mentioned', '未知')}",
+                        "priority": data.get("priority", 0),
+                        "last_date": data.get("last_mentioned", ""),
+                    }
+                )
+
+        associations = long_term_memory.get("memory_associations", {})
+        for assoc_name, data in associations.items():
+            if "_" in assoc_name:
+                scene_name, app_name = assoc_name.split("_", 1)
+                title = f"{scene_name} x {app_name}"
+            else:
+                title = assoc_name
+            memories.append(
+                {
+                    "category": "associations",
+                    "category_label": "记忆关联",
+                    "title": title,
+                    "summary": f"关联出现 {int(data.get('count', 0) or 0)} 次",
+                    "meta": f"最近出现: {data.get('last_occurred', '未知')}",
+                    "priority": data.get("count", 0),
+                    "last_date": data.get("last_occurred", ""),
+                }
+            )
+
+        shared_activities = long_term_memory.get("shared_activities", {})
+        for activity_name, data in shared_activities.items():
+            category = str(data.get("category", "other") or "other")
+            category_label_map = {
+                "watch_media": "一起看过",
+                "game": "一起玩过",
+                "test": "一起做过测试",
+                "screen_interaction": "识屏共同经历",
+                "other": "共同经历",
+            }
+            memories.append(
+                {
+                    "category": "shared_activities",
+                    "category_label": "共同经历",
+                    "title": activity_name,
+                    "summary": category_label_map.get(category, "共同经历"),
+                    "meta": f"最近一次: {data.get('last_shared', '未知')} | 提及 {int(data.get('count', 0) or 0)} 次",
+                    "priority": data.get("priority", data.get("count", 0)),
+                    "last_date": data.get("last_shared", ""),
+                }
+            )
+
+        memories.sort(
+            key=lambda item: (item.get("priority", 0), item.get("title", "")),
+            reverse=True,
+        )
+        return memories
+
     async def handle_list_observations(self, request):
         """List observation records."""
         try:
@@ -551,57 +843,7 @@ class WebServer:
             sort = request.query.get('sort', 'desc')  # desc 或 asc
             scene = request.query.get('scene', '')
             
-            # 复制观察记录以便后续筛选和格式化
-            observations = []
-            for index, obs in enumerate(self.plugin.observations.copy()):
-                scene = str(obs.get("scene", "") or "").strip()
-                if scene.lower() in {"unknown", "none", "null"} or scene == "鏈煡":
-                    scene = ""
-
-                active_window = str(
-                    obs.get("active_window")
-                    or obs.get("window_title")
-                    or ""
-                ).strip()
-                if active_window.lower() in {"unknown", "none", "null"} or active_window in {"??", "?????"}:
-                    active_window = ""
-
-                content = str(
-                    obs.get("content")
-                    or obs.get("description")
-                    or obs.get("recognition")
-                    or ""
-                ).strip()
-
-                # 计算时间段
-                time_period = ""
-                timestamp = obs.get('timestamp', '')
-                if timestamp:
-                    try:
-                        # 解析ISO格式的时间戳
-                        if 'T' in timestamp:
-                            hour = int(timestamp.split('T')[1].split(':')[0])
-                            if 0 <= hour < 6:
-                                time_period = "凌晨"
-                            elif 6 <= hour < 12:
-                                time_period = "上午"
-                            elif 12 <= hour < 18:
-                                time_period = "下午"
-                            else:
-                                time_period = "晚上"
-                    except Exception:
-                        pass
-
-                observations.append(
-                    {
-                        "index": index,
-                        **obs,
-                        "scene": scene,
-                        "active_window": active_window,
-                        "content": content,
-                        "time_period": time_period,
-                    }
-                )
+            observations = self._collect_formatted_observations()
             
             # 按场景过滤
             if scene:
@@ -633,79 +875,7 @@ class WebServer:
     async def handle_list_memories(self, request):
         """获取长期记忆列表。"""
         try:
-            memories = []
-            if hasattr(self.plugin, "_clean_long_term_memory_noise"):
-                self.plugin._clean_long_term_memory_noise()
-            long_term_memory = getattr(self.plugin, "long_term_memory", {}) or {}
-
-            applications = long_term_memory.get("applications", {})
-            for app_name, data in applications.items():
-                scenes = data.get("scenes", {}) or {}
-                top_scenes = sorted(scenes.items(), key=lambda item: item[1], reverse=True)[:3]
-                scene_summary = "、".join(name for name, _ in top_scenes) if top_scenes else ""
-                memories.append(
-                    {
-                        "category": "applications",
-                        "category_label": "常用应用",
-                        "title": app_name,
-                        "summary": f"出现 {int(data.get('usage_count', 0) or 0)} 次",
-                        "meta": f"最近使用: {data.get('last_used', '未知')} | 关联场景: {scene_summary or '暂无'}",
-                        "priority": data.get("priority", 0),
-                    }
-                )
-
-            scenes = long_term_memory.get("scenes", {})
-            for scene_name, data in scenes.items():
-                memories.append(
-                        {
-                            "category": "scenes",
-                            "category_label": "高频场景",
-                            "title": scene_name,
-                            "summary": f"出现 {int(data.get('count', 0) or 0)} 次",
-                            "meta": f"最近出现: {data.get('last_used', '未知')}",
-                            "priority": data.get("priority", 0),
-                        }
-                    )
-
-            user_preferences = long_term_memory.get("user_preferences", {})
-            for category, preferences in user_preferences.items():
-                for pref_name, data in preferences.items():
-                    memories.append(
-                        {
-                            "category": "preferences",
-                            "category_label": "用户偏好",
-                            "title": pref_name,
-                            "summary": f"记录于 {category}",
-                            "meta": f"最近提及: {data.get('last_mentioned', '未知')}",
-                            "priority": data.get("priority", 0),
-                        }
-                    )
-
-            associations = long_term_memory.get("memory_associations", {})
-            for assoc_name, data in associations.items():
-                if "_" in assoc_name:
-                    scene_name, app_name = assoc_name.split("_", 1)
-                    title = f"{scene_name} x {app_name}"
-                else:
-                    title = assoc_name
-                memories.append(
-                    {
-                        "category": "associations",
-                        "category_label": "记忆关联",
-                        "title": title,
-                        "summary": f"关联出现 {int(data.get('count', 0) or 0)} 次",
-                        "meta": f"最近出现: {data.get('last_occurred', '未知')}",
-                        "priority": data.get("count", 0),
-                    }
-                )
-
-            memories.sort(
-                key=lambda item: (item.get("priority", 0), item.get("title", "")),
-                reverse=True,
-            )
-            return self._ok({
-                'memories': memories
-            })
+            return self._ok({'memories': self._collect_memory_records()})
         except Exception as e:
             logger.error(f"Error listing memories: {e}")
             return self._err(str(e))
@@ -714,8 +884,8 @@ class WebServer:
         """Return basic config metadata."""
         try:
             return self._ok({
-                "version": "2.5.2",
-                "plugin_version": "2.5.2"
+                "version": "2.5.3",
+                "plugin_version": "2.5.3"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -1031,8 +1201,8 @@ class WebServer:
             {
                 "status": "ok",
                 "service": "screen-companion-webui",
-                "version": "2.5.2",
-                "plugin_version": "2.5.2",
+                "version": "2.5.3",
+                "plugin_version": "2.5.3",
                 "host": self.host,
                 "port": self.port,
                 "auth_enabled": bool(self._get_expected_secret()),
@@ -1090,6 +1260,94 @@ class WebServer:
             "presets": presets,
         }
 
+    def _build_activity_stats(self, activity_history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if activity_history is None:
+            activity_history = getattr(self.plugin, "activity_history", []) or []
+        today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+
+        today_work_time = 0
+        today_play_time = 0
+        today_other_time = 0
+
+        for activity in activity_history:
+            if activity.get("start_time", 0) >= today_start:
+                duration = activity.get("duration", 0)
+                activity_type = activity.get("type", "其他")
+                if activity_type == "工作":
+                    today_work_time += duration
+                elif activity_type == "摸鱼":
+                    today_play_time += duration
+                else:
+                    today_other_time += duration
+
+        total_work_time = sum(
+            activity.get("duration", 0)
+            for activity in activity_history
+            if activity.get("type") == "工作"
+        )
+        total_play_time = sum(
+            activity.get("duration", 0)
+            for activity in activity_history
+            if activity.get("type") == "摸鱼"
+        )
+        total_other_time = sum(
+            activity.get("duration", 0)
+            for activity in activity_history
+            if activity.get("type") not in {"工作", "摸鱼"}
+        )
+
+        recent_activities = sorted(
+            activity_history,
+            key=lambda x: x.get("start_time", 0),
+            reverse=True,
+        )[:10]
+
+        formatted_activities = []
+        for activity in recent_activities:
+            start_ts = activity.get("start_time", 0)
+            end_ts = activity.get("end_time", 0)
+            duration = activity.get("duration", 0)
+            formatted_activities.append(
+                {
+                    "type": activity.get("type", "其他"),
+                    "scene": activity.get("scene", ""),
+                    "window": activity.get("window", ""),
+                    "start_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_ts)),
+                    "end_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(end_ts)),
+                    "duration": self._format_duration(duration),
+                    "duration_seconds": int(duration or 0),
+                }
+            )
+
+        return {
+            "today": {
+                "work_time": self._format_duration(today_work_time),
+                "play_time": self._format_duration(today_play_time),
+                "other_time": self._format_duration(today_other_time),
+                "total_time": self._format_duration(
+                    today_work_time + today_play_time + today_other_time
+                ),
+                "work_seconds": int(today_work_time),
+                "play_seconds": int(today_play_time),
+                "other_seconds": int(today_other_time),
+                "total_seconds": int(today_work_time + today_play_time + today_other_time),
+            },
+            "total": {
+                "work_time": self._format_duration(total_work_time),
+                "play_time": self._format_duration(total_play_time),
+                "other_time": self._format_duration(total_other_time),
+                "total_time": self._format_duration(
+                    total_work_time + total_play_time + total_other_time
+                ),
+                "work_seconds": int(total_work_time),
+                "play_seconds": int(total_play_time),
+                "other_seconds": int(total_other_time),
+                "total_seconds": int(total_work_time + total_play_time + total_other_time),
+            },
+            "recent_activities": formatted_activities,
+            "activity_count": len(activity_history),
+        }
+
     async def handle_get_runtime_status(self, request):
         """将静态资源请求安全地映射到 web 目录。"""
         try:
@@ -1110,72 +1368,227 @@ class WebServer:
     async def handle_get_activity_stats(self, request):
         """Get activity statistics (work vs play time)."""
         try:
-            import time
-            current_time = time.time()
-            
-            # 获取活动历史
-            activity_history = getattr(self.plugin, "activity_history", [])
-            
-            # 计算今天的开始时间
-            today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
-            
-            # 统计今天的工作和摸鱼时间
-            today_work_time = 0
-            today_play_time = 0
-            today_other_time = 0
-            
-            for activity in activity_history:
-                if activity.get("start_time", 0) >= today_start:
-                    duration = activity.get("duration", 0)
-                    activity_type = activity.get("type", "其他")
-                    if activity_type == "工作":
-                        today_work_time += duration
-                    elif activity_type == "摸鱼":
-                        today_play_time += duration
-                    else:
-                        today_other_time += duration
-            
-            # 统计总时间
-            total_work_time = sum(activity.get("duration", 0) for activity in activity_history if activity.get("type") == "工作")
-            total_play_time = sum(activity.get("duration", 0) for activity in activity_history if activity.get("type") == "摸鱼")
-            total_other_time = sum(activity.get("duration", 0) for activity in activity_history if activity.get("type") != "工作" and activity.get("type") != "摸鱼")
-            
-            # 获取最近的活动
-            recent_activities = sorted(activity_history, key=lambda x: x.get("start_time", 0), reverse=True)[:10]
-            
-            # 格式化活动数据
-            formatted_activities = []
-            for activity in recent_activities:
-                start_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(activity.get("start_time", 0)))
-                end_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(activity.get("end_time", 0)))
-                duration = activity.get("duration", 0)
-                formatted_activities.append({
-                    "type": activity.get("type", "其他"),
-                    "scene": activity.get("scene", ""),
-                    "window": activity.get("window", ""),
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "duration": f"{int(duration // 60)}分{int(duration % 60)}秒"
-                })
-            
-            return self._ok({
-                "today": {
-                    "work_time": f"{int(today_work_time // 60)}分{int(today_work_time % 60)}秒",
-                    "play_time": f"{int(today_play_time // 60)}分{int(today_play_time % 60)}秒",
-                    "other_time": f"{int(today_other_time // 60)}分{int(today_other_time % 60)}秒",
-                    "total_time": f"{int((today_work_time + today_play_time + today_other_time) // 60)}分{int((today_work_time + today_play_time + today_other_time) % 60)}秒"
-                },
-                "total": {
-                    "work_time": f"{int(total_work_time // 60)}分{int(total_work_time % 60)}秒",
-                    "play_time": f"{int(total_play_time // 60)}分{int(total_play_time % 60)}秒",
-                    "other_time": f"{int(total_other_time // 60)}分{int(total_other_time % 60)}秒",
-                    "total_time": f"{int((total_work_time + total_play_time + total_other_time) // 60)}分{int((total_work_time + total_play_time + total_other_time) % 60)}秒"
-                },
-                "recent_activities": formatted_activities,
-                "activity_count": len(activity_history)
-            })
+            return self._ok(self._build_activity_stats())
         except Exception as e:
             logger.error(f"Error getting activity stats: {e}")
+            return self._err(str(e))
+
+    async def handle_get_dashboard_stats(self, request):
+        """Return aggregated statistics for the WebUI dashboard tables."""
+        try:
+            requested_range = request.query.get("range", "30d")
+            requested_start_date = request.query.get("start_date", "")
+            requested_end_date = request.query.get("end_date", "")
+            range_info = self._get_dashboard_range(
+                requested_range,
+                requested_start_date,
+                requested_end_date,
+            )
+            runtime = self._build_runtime_status()
+            all_activity_history = getattr(self.plugin, "activity_history", []) or []
+            filtered_activity_history = [
+                item
+                for item in all_activity_history
+                if (
+                    (range_info.get("start_timestamp") is None
+                     or float(item.get("start_time", 0) or 0) >= float(range_info["start_timestamp"]))
+                    and (
+                        range_info.get("end_timestamp_exclusive") is None
+                        or float(item.get("start_time", 0) or 0) < float(range_info["end_timestamp_exclusive"])
+                    )
+                )
+            ]
+            activity = self._build_activity_stats(filtered_activity_history)
+            total_activity = self._build_activity_stats(all_activity_history)
+            observations = [
+                item
+                for item in self._collect_formatted_observations()
+                if self._is_iso_datetime_in_range(item.get("timestamp", ""), range_info)
+            ]
+            memories = [
+                item
+                for item in self._collect_memory_records()
+                if self._is_iso_date_in_range(item.get("last_date", ""), range_info)
+            ]
+            diaries = []
+            try:
+                diaries = [
+                    item
+                    for item in self.plugin._get_diary_dates_with_content()
+                    if self._is_iso_date_in_range(item.get("date", ""), range_info)
+                ]
+            except Exception:
+                diaries = []
+
+            overview_rows = [
+                {
+                    "metric": "统计范围",
+                    "value": range_info["label"],
+                    "detail": f"筛选键 {range_info['key']}",
+                },
+                {
+                    "metric": "插件状态",
+                    "value": "已启用" if runtime.get("enabled") else "已关闭",
+                    "detail": f"运行态 {runtime.get('state', 'unknown')} / 自动任务 {runtime.get('active_task_count', 0)} 个",
+                },
+                {
+                    "metric": "当前预设",
+                    "value": str(runtime.get("current_preset_index", -1)),
+                    "detail": f"生效间隔 {runtime.get('current_check_interval', 0)} 秒 / 触发 {runtime.get('current_trigger_probability', 0)}%",
+                },
+                {
+                    "metric": "互动频率",
+                    "value": str(runtime.get("interaction_frequency", 0)),
+                    "detail": f"模式 {runtime.get('interaction_mode', '未设置')}",
+                },
+                {
+                    "metric": "日记数量",
+                    "value": str(len(diaries)),
+                    "detail": f"最近日期 {diaries[0].get('date', '暂无') if diaries else '暂无'}",
+                },
+                {
+                    "metric": "观察记录",
+                    "value": str(len(observations)),
+                    "detail": "包含全部已保留观察条目",
+                },
+                {
+                    "metric": "长期记忆",
+                    "value": str(len(memories)),
+                    "detail": "包含应用、场景、偏好、关联与共同经历",
+                },
+                {
+                    "metric": "活动片段",
+                    "value": str(activity.get("activity_count", 0)),
+                    "detail": f"{range_info['label']}内累计 {activity.get('total', {}).get('total_time', '0分0秒')}",
+                },
+            ]
+
+            activity_rows = []
+            if range_info["key"] == "today":
+                activity_rows.append(
+                    {
+                        "range": "今天",
+                        "work": activity.get("today", {}).get("work_time", "0分0秒"),
+                        "play": activity.get("today", {}).get("play_time", "0分0秒"),
+                        "other": activity.get("today", {}).get("other_time", "0分0秒"),
+                        "total": activity.get("today", {}).get("total_time", "0分0秒"),
+                    }
+                )
+            else:
+                activity_rows.append(
+                    {
+                        "range": range_info["label"],
+                        "work": activity.get("total", {}).get("work_time", "0分0秒"),
+                        "play": activity.get("total", {}).get("play_time", "0分0秒"),
+                        "other": activity.get("total", {}).get("other_time", "0分0秒"),
+                        "total": activity.get("total", {}).get("total_time", "0分0秒"),
+                    }
+                )
+            if range_info["key"] != "all":
+                activity_rows.append(
+                    {
+                        "range": "全部历史",
+                        "work": total_activity.get("total", {}).get("work_time", "0分0秒"),
+                        "play": total_activity.get("total", {}).get("play_time", "0分0秒"),
+                        "other": total_activity.get("total", {}).get("other_time", "0分0秒"),
+                        "total": total_activity.get("total", {}).get("total_time", "0分0秒"),
+                    }
+                )
+
+            scene_groups: dict[str, dict[str, Any]] = defaultdict(
+                lambda: {"count": 0, "latest_timestamp": "", "latest_window": "", "time_period": ""}
+            )
+            for observation in observations:
+                scene_name = observation.get("scene") or "未标注"
+                bucket = scene_groups[scene_name]
+                bucket["count"] += 1
+                timestamp = str(observation.get("timestamp", "") or "")
+                if timestamp >= bucket["latest_timestamp"]:
+                    bucket["latest_timestamp"] = timestamp
+                    bucket["latest_window"] = observation.get("active_window") or "暂无"
+                    bucket["time_period"] = observation.get("time_period") or "未知"
+
+            scene_rows = [
+                {
+                    "scene": scene_name,
+                    "count": str(data["count"]),
+                    "last_seen": data["latest_timestamp"] or "未知",
+                    "time_period": data["time_period"] or "未知",
+                    "window": data["latest_window"] or "暂无",
+                }
+                for scene_name, data in sorted(
+                    scene_groups.items(),
+                    key=lambda item: (item[1]["count"], item[1]["latest_timestamp"]),
+                    reverse=True,
+                )[:12]
+            ]
+
+            memory_category_groups: dict[str, dict[str, Any]] = defaultdict(
+                lambda: {"count": 0, "max_priority": 0, "top_title": ""}
+            )
+            for memory in memories:
+                category_label = memory.get("category_label") or "未分类"
+                bucket = memory_category_groups[category_label]
+                bucket["count"] += 1
+                priority = int(memory.get("priority", 0) or 0)
+                if priority >= bucket["max_priority"]:
+                    bucket["max_priority"] = priority
+                    bucket["top_title"] = memory.get("title", "")
+
+            memory_category_rows = [
+                {
+                    "category": category_label,
+                    "count": str(data["count"]),
+                    "max_priority": str(data["max_priority"]),
+                    "example": data["top_title"] or "暂无",
+                }
+                for category_label, data in sorted(
+                    memory_category_groups.items(),
+                    key=lambda item: (item[1]["count"], item[1]["max_priority"]),
+                    reverse=True,
+                )
+            ]
+
+            top_memory_rows = [
+                {
+                    "rank": str(index + 1),
+                    "title": memory.get("title", ""),
+                    "category": memory.get("category_label", ""),
+                    "priority": str(memory.get("priority", 0)),
+                    "summary": memory.get("summary", ""),
+                }
+                for index, memory in enumerate(memories[:10])
+            ]
+
+            recent_activity_rows = [
+                {
+                    "start": item.get("start_time", ""),
+                    "end": item.get("end_time", ""),
+                    "type": item.get("type", ""),
+                    "scene": item.get("scene", "") or "未标注",
+                    "window": item.get("window", "") or "暂无",
+                    "duration": item.get("duration", ""),
+                }
+                for item in activity.get("recent_activities", [])
+            ]
+
+            return self._ok(
+                {
+                    "generated_at": datetime.now().isoformat(),
+                    "range_key": range_info["key"],
+                    "range_label": range_info["label"],
+                    "range_start_date": str(range_info.get("start_date") or ""),
+                    "range_end_date": str(range_info.get("end_date") or ""),
+                    "overview_rows": overview_rows,
+                    "activity_rows": activity_rows,
+                    "scene_rows": scene_rows,
+                    "memory_category_rows": memory_category_rows,
+                    "top_memory_rows": top_memory_rows,
+                    "recent_activity_rows": recent_activity_rows,
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error getting dashboard stats: {e}")
             return self._err(str(e))
 
     async def handle_update_runtime_config(self, request):

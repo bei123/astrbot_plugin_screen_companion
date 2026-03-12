@@ -60,6 +60,7 @@
         </section>
 
         <nav class="top-nav" aria-label="主导航">
+            <a href="#stats" class="nav-link" data-section="stats">统计看板</a>
             <a href="#runtime" class="nav-link" data-section="runtime">运行状态</a>
             <a href="#settings" class="nav-link" data-section="settings">配置中心</a>
             <a href="#diaries" class="nav-link active" data-section="diaries">今日日记</a>
@@ -68,6 +69,36 @@
         </nav>
 
         <main class="content-stack">
+            <section id="stats" class="section">
+                <div class="section-heading">
+                    <div>
+                        <p class="eyebrow">Statistics Deck</p>
+                        <h2>统计看板</h2>
+                    </div>
+                    <div class="toolbar">
+                        <label class="field compact-field">
+                            <span>时间范围</span>
+                            <select id="statsRangeFilter">
+                                <option value="today">今天</option>
+                                <option value="7d">近 7 天</option>
+                                <option value="30d" selected>近 30 天</option>
+                                <option value="custom">自定义日期</option>
+                                <option value="all">全部时间</option>
+                            </select>
+                        </label>
+                        <label class="field compact-field hidden" id="statsStartDateField">
+                            <span>开始日期</span>
+                            <input id="statsStartDateInput" type="date">
+                        </label>
+                        <label class="field compact-field hidden" id="statsEndDateField">
+                            <span>结束日期</span>
+                            <input id="statsEndDateInput" type="date">
+                        </label>
+                        <button class="ghost-button hidden" id="applyStatsRangeButton" type="button">应用范围</button>
+                    </div>
+                </div>
+                <div class="stats-layout" id="statsTables"></div>
+            </section>
             <section id="runtime" class="section">
                 <div class="section-heading">
                     <div>

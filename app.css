@@ -266,6 +266,16 @@ button { cursor: pointer; }
     gap: 18px;
 }
 
+.stats-layout {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+}
+
+.table-card-wide {
+    grid-column: 1 / -1;
+}
+
 .settings-grid {
     display: grid;
     grid-template-columns: minmax(240px, 0.58fr) minmax(0, 1.42fr);
@@ -693,6 +703,60 @@ button { cursor: pointer; }
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.table-card {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.data-table-wrapper {
+    overflow-x: auto;
+    border-radius: 18px;
+    border: 1px solid rgba(97, 77, 64, 0.1);
+    background: rgba(255, 255, 255, 0.52);
+}
+
+.data-table {
+    width: 100%;
+    min-width: 640px;
+    border-collapse: collapse;
+    font-size: 0.94rem;
+}
+
+.data-table th,
+.data-table td {
+    padding: 13px 14px;
+    text-align: left;
+    vertical-align: top;
+    line-height: 1.55;
+    border-bottom: 1px solid rgba(97, 77, 64, 0.08);
+}
+
+.data-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: rgba(248, 242, 234, 0.96);
+    color: var(--muted);
+    font-size: 0.82rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.data-table tbody tr:nth-child(even) {
+    background: rgba(255, 255, 255, 0.38);
+}
+
+.data-table tbody tr:hover {
+    background: rgba(188, 108, 37, 0.08);
+}
+
+.data-table-numeric {
+    text-align: right !important;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
 .empty-state {
     display: grid;
     place-items: center;
@@ -720,7 +784,7 @@ button { cursor: pointer; }
 .error-text { color: var(--danger); min-height: 1.2em; }
 
 @media (max-width: 1080px) {
-.hero, .diaries-grid, .memory-highlights, .memory-groups, .runtime-grid, .settings-grid, .settings-form { grid-template-columns: 1fr; }
+.hero, .diaries-grid, .memory-highlights, .memory-groups, .runtime-grid, .settings-grid, .settings-form, .stats-layout { grid-template-columns: 1fr; }
     .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -740,4 +804,5 @@ button { cursor: pointer; }
     .runtime-actions { flex-direction: column; align-items: stretch; }
     .observation-actions,
     .observation-footer { flex-direction: column; align-items: stretch; }
+    .data-table { min-width: 560px; }
 }

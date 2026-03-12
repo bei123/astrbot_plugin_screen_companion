@@ -12,7 +12,11 @@ const state = {
     observationLimit: 12,
     sceneFilter: "",
     sortFilter: "desc",
+    dashboardRange: "30d",
+    dashboardStartDate: "",
+    dashboardEndDate: "",
     memories: [],
+    dashboardStats: null,
     runtime: null,
     diaryObservationsExpanded: false,
     settingsSchema: {},
@@ -52,6 +56,13 @@ const elements = {
     deleteSelectedButton: document.getElementById("deleteSelectedButton"),
     memoryHighlights: document.getElementById("memoryHighlights"),
     memoryGroups: document.getElementById("memoryGroups"),
+    statsTables: document.getElementById("statsTables"),
+    statsRangeFilter: document.getElementById("statsRangeFilter"),
+    statsStartDateField: document.getElementById("statsStartDateField"),
+    statsEndDateField: document.getElementById("statsEndDateField"),
+    statsStartDateInput: document.getElementById("statsStartDateInput"),
+    statsEndDateInput: document.getElementById("statsEndDateInput"),
+    applyStatsRangeButton: document.getElementById("applyStatsRangeButton"),
     loginOverlay: document.getElementById("loginOverlay"),
     loginForm: document.getElementById("loginForm"),
     loginPassword: document.getElementById("loginPassword"),
@@ -83,6 +94,18 @@ const elements = {
     navLinks: Array.from(document.querySelectorAll(".nav-link")),
     sections: Array.from(document.querySelectorAll(".section")),
 };
+
+function getLocalDateString(offsetDays = 0) {
+    const date = new Date();
+    date.setDate(date.getDate() + offsetDays);
+    const year = date.getFullYear();
+    const month = `${date.getMonth() + 1}`.padStart(2, "0");
+    const day = `${date.getDate()}`.padStart(2, "0");
+    return `${year}-${month}-${day}`;
+}
+
+state.dashboardStartDate = getLocalDateString(-29);
+state.dashboardEndDate = getLocalDateString(0);
 
 function escapeHtml(value) {
     return String(value ?? "")
@@ -175,6 +198,68 @@ function hideLoginForm() {
 
 function renderLoading(target, text = "正在加载…") {
     target.innerHTML = `<div class="empty-state"><strong>${escapeHtml(text)}</strong></div>`;
+}
+
+function syncDashboardRangeControls() {
+    const isCustom = state.dashboardRange === "custom";
+    elements.statsRangeFilter.value = state.dashboardRange;
+    elements.statsStartDateField.classList.toggle("hidden", !isCustom);
+    elements.statsEndDateField.classList.toggle("hidden", !isCustom);
+    elements.applyStatsRangeButton.classList.toggle("hidden", !isCustom);
+    elements.statsStartDateInput.value = state.dashboardStartDate || "";
+    elements.statsEndDateInput.value = state.dashboardEndDate || "";
+}
+
+function renderTableCard({ title, subtitle = "", columns = [], rows = [], wide = false, emptyText = "暂无统计数据。" }) {
+    const article = document.createElement("article");
+    article.className = "panel table-card";
+    if (wide) article.classList.add("table-card-wide");
+
+    const header = document.createElement("div");
+    header.className = "panel-header";
+    header.innerHTML = `
+        <h3>${escapeHtml(title)}</h3>
+        <span class="panel-subtle">${escapeHtml(subtitle)}</span>
+    `;
+    article.appendChild(header);
+
+    if (!rows.length) {
+        const empty = cloneEmptyState();
+        const hint = empty.querySelector("p");
+        if (hint) hint.textContent = emptyText;
+        article.appendChild(empty);
+        return article;
+    }
+
+    const tableWrapper = document.createElement("div");
+    tableWrapper.className = "data-table-wrapper";
+
+    const table = document.createElement("table");
+    table.className = "data-table";
+
+    const thead = document.createElement("thead");
+    thead.innerHTML = `<tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr>`;
+
+    const tbody = document.createElement("tbody");
+    tbody.innerHTML = rows
+        .map(
+            (row) => `
+                <tr>
+                    ${columns
+                        .map((column) => {
+                            const className = column.numeric ? "data-table-numeric" : "";
+                            return `<td class="${className}">${escapeHtml(row[column.key] ?? "")}</td>`;
+                        })
+                        .join("")}
+                </tr>
+            `
+        )
+        .join("");
+
+    table.append(thead, tbody);
+    tableWrapper.appendChild(table);
+    article.appendChild(tableWrapper);
+    return article;
 }
 
 function switchSection(sectionId) {
@@ -826,6 +911,110 @@ function renderMemories() {
     });
 }
 
+function renderDashboard() {
+    elements.statsTables.innerHTML = "";
+    const dashboard = state.dashboardStats;
+    if (!dashboard) {
+        syncDashboardRangeControls();
+        elements.statsTables.appendChild(cloneEmptyState());
+        return;
+    }
+
+    if (dashboard.range_key && elements.statsRangeFilter) {
+        state.dashboardRange = dashboard.range_key;
+    }
+    if (dashboard.range_start_date) {
+        state.dashboardStartDate = dashboard.range_start_date;
+    }
+    if (dashboard.range_end_date) {
+        state.dashboardEndDate = dashboard.range_end_date;
+    }
+    syncDashboardRangeControls();
+
+    const generatedAt = dashboard.generated_at ? `更新于 ${formatDateTime(dashboard.generated_at)}` : "等待刷新";
+    const rangeLabel = dashboard.range_label || "当前范围";
+
+    const tables = [
+        {
+            title: "总览统计",
+            subtitle: `${rangeLabel} · ${generatedAt}`,
+            columns: [
+                { key: "metric", label: "指标" },
+                { key: "value", label: "数值", numeric: true },
+                { key: "detail", label: "说明" },
+            ],
+            rows: dashboard.overview_rows || [],
+        },
+        {
+            title: "活动时间汇总",
+            subtitle: `基于 ${rangeLabel} 汇总活动时间`,
+            columns: [
+                { key: "range", label: "范围" },
+                { key: "work", label: "工作" },
+                { key: "play", label: "摸鱼" },
+                { key: "other", label: "其他" },
+                { key: "total", label: "总计" },
+            ],
+            rows: dashboard.activity_rows || [],
+        },
+        {
+            title: "观察场景分布",
+            subtitle: `${rangeLabel} 内已保留观察记录的聚合结果`,
+            columns: [
+                { key: "scene", label: "场景" },
+                { key: "count", label: "次数", numeric: true },
+                { key: "last_seen", label: "最近出现" },
+                { key: "time_period", label: "时段" },
+                { key: "window", label: "最近窗口" },
+            ],
+            rows: dashboard.scene_rows || [],
+            wide: true,
+        },
+        {
+            title: "记忆分类统计",
+            subtitle: `${rangeLabel} 内仍然活跃的长期记忆`,
+            columns: [
+                { key: "category", label: "分类" },
+                { key: "count", label: "条数", numeric: true },
+                { key: "max_priority", label: "最高优先级", numeric: true },
+                { key: "example", label: "代表项" },
+            ],
+            rows: dashboard.memory_category_rows || [],
+        },
+        {
+            title: "高优先级记忆排行",
+            subtitle: `${rangeLabel} 内最值得被提取到上下文的长期记忆`,
+            columns: [
+                { key: "rank", label: "#" },
+                { key: "title", label: "标题" },
+                { key: "category", label: "分类" },
+                { key: "priority", label: "优先级", numeric: true },
+                { key: "summary", label: "摘要" },
+            ],
+            rows: dashboard.top_memory_rows || [],
+            wide: true,
+        },
+        {
+            title: "最近活动流水",
+            subtitle: `${rangeLabel} 内最近 10 条已归档活动片段`,
+            columns: [
+                { key: "start", label: "开始时间" },
+                { key: "end", label: "结束时间" },
+                { key: "type", label: "类型" },
+                { key: "scene", label: "场景" },
+                { key: "window", label: "窗口" },
+                { key: "duration", label: "时长" },
+            ],
+            rows: dashboard.recent_activity_rows || [],
+            wide: true,
+        },
+    ];
+
+    tables.forEach((tableConfig) => {
+        elements.statsTables.appendChild(renderTableCard(tableConfig));
+    });
+}
+
 function renderRuntime() {
     const runtime = state.runtime;
     elements.runtimeStats.innerHTML = "";
@@ -883,6 +1072,20 @@ async function loadRuntime() {
     const data = await apiFetch("/api/runtime");
     state.runtime = data.runtime || null;
     renderRuntime();
+}
+
+async function loadDashboardStats() {
+    renderLoading(elements.statsTables, "正在整理统计看板…");
+    const query = new URLSearchParams({
+        range: state.dashboardRange,
+    });
+    if (state.dashboardRange === "custom") {
+        if (state.dashboardStartDate) query.set("start_date", state.dashboardStartDate);
+        if (state.dashboardEndDate) query.set("end_date", state.dashboardEndDate);
+    }
+    const data = await apiFetch(`/api/dashboard?${query.toString()}`);
+    state.dashboardStats = data || null;
+    renderDashboard();
 }
 
 async function loadSettings() {
@@ -956,6 +1159,7 @@ async function loadMemories() {
 
 async function refreshActiveSection() {
     await loadConfig();
+    await loadDashboardStats();
     await loadRuntime();
     await loadSettings();
     await loadDiaries();
@@ -1045,6 +1249,44 @@ elements.sortFilter.addEventListener("change", async () => {
     state.sortFilter = elements.sortFilter.value;
     state.observationPage = 1;
     await loadObservations();
+});
+
+elements.statsRangeFilter.addEventListener("change", async () => {
+    state.dashboardRange = elements.statsRangeFilter.value || "30d";
+    syncDashboardRangeControls();
+    if (state.dashboardRange !== "custom") {
+        await loadDashboardStats();
+    }
+});
+
+elements.statsStartDateInput.addEventListener("change", () => {
+    state.dashboardStartDate = elements.statsStartDateInput.value || "";
+});
+
+elements.statsEndDateInput.addEventListener("change", () => {
+    state.dashboardEndDate = elements.statsEndDateInput.value || "";
+});
+
+elements.applyStatsRangeButton.addEventListener("click", async () => {
+    state.dashboardStartDate = elements.statsStartDateInput.value || "";
+    state.dashboardEndDate = elements.statsEndDateInput.value || "";
+
+    if (!state.dashboardStartDate || !state.dashboardEndDate) {
+        setConnectionState("error", "请先选择完整的起止日期。");
+        return;
+    }
+    if (state.dashboardStartDate > state.dashboardEndDate) {
+        setConnectionState("error", "开始日期不能晚于结束日期。");
+        return;
+    }
+
+    setConnectionState("online", "正在按自定义日期刷新统计…");
+    try {
+        await loadDashboardStats();
+        setConnectionState("online", "统计看板已按自定义日期更新。");
+    } catch (error) {
+        setConnectionState("error", `刷新失败: ${error.message}`);
+    }
 });
 
 elements.selectAllObservations.addEventListener("change", () => {
@@ -1166,7 +1408,7 @@ elements.logoutButton.addEventListener("click", async () => {
 
 window.addEventListener("DOMContentLoaded", async () => {
     const hash = window.location.hash.replace("#", "");
-    if (["runtime", "settings", "diaries", "observations", "memories"].includes(hash)) {
+    if (["stats", "runtime", "settings", "diaries", "observations", "memories"].includes(hash)) {
         switchSection(hash);
     }
 
