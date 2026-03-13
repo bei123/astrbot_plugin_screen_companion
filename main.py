@@ -1294,6 +1294,24 @@ class ScreenCompanion(Star):
             text = text.strip()
             normalized = re.sub(r"\s+", "", text.lower())
 
+        # 检查是否以"帮我"开头（支持"帮我"和"你帮我"两种形式）
+        if not (normalized.startswith("帮我") or normalized.startswith("你帮我")):
+            return ""
+
+        # 应用启动器相关的排除标记，避免与应用启动器插件冲突
+        app_launcher_excludes = (
+            "打开", "启动", "运行", "开启", "打开一下", "启动一下", "运行一下",
+            "百度", "搜索", "查找", "查询", "搜索一下", "查一下", "搜一下",
+            "浏览器", "网页", "网站", "网址", "网页链接", "网站链接",
+            "http://", "https://", ".com", ".cn", ".org", ".net", ".io",
+            "直播", "直播间", "直播页", "动态", "最新动态", "动态页", "视频", "最新视频", "投稿",
+            "应用", "程序", "软件", "app",
+        )
+
+        # 检查是否包含应用启动器相关的关键词，避免冲突
+        if any(marker in normalized for marker in app_launcher_excludes):
+            return ""
+
         request_markers = (
             "帮我看看",
             "帮我看下",
@@ -1328,7 +1346,6 @@ class ScreenCompanion(Star):
             "界面",
             "文档",
             "作业",
-            "视频",
             "游戏",
             "题目",
             "插件",
@@ -1346,13 +1363,26 @@ class ScreenCompanion(Star):
             "别截图",
             "不用识屏",
             "不要识屏",
+            "别帮我",
+            "不用帮我",
+            "不要帮我",
         )
 
+        # 先检查否定标记，避免误触发
         if any(marker in normalized for marker in negative_markers):
             return ""
 
         has_request = any(marker in normalized for marker in request_markers)
         has_context = any(marker in normalized for marker in context_markers)
+        
+        # 优化：如果包含"帮我"且消息长度合理，即使没有明确的上下文标记也尝试识屏
+        # 这样可以避免误触导致的空消息
+        has_help = "帮我" in normalized
+        if has_help and len(text) >= 3 and len(text) <= 100:
+            # 如果只有"帮我"但没有上下文，仍然尝试处理，但返回原文本
+            return text[:160]
+        
+        # 原有逻辑：需要同时有请求和上下文标记
         if not (has_request and has_context):
             return ""
 
@@ -3148,14 +3178,7 @@ class ScreenCompanion(Star):
         task_id: str = "unknown",
     ) -> list[BaseMessageComponent]:
         """执行一次完整的截图分析与陪伴式回复。"""
-        # 如果当前处于休息时间段，则不触发事件
-        if self._is_in_rest_time_range():
-            logger.info(
-                f"[任务 {task_id}] 当前处于休息时间段，取消视觉 API 调用"
-            )
-            return []
-        
-        # 在调用视觉 API 之前再次检查活跃时间段
+        # 在调用视觉 API 之前检查活跃时间段
         if not self._is_in_active_time_range():
             logger.info(
                 f"[任务 {task_id}] 当前不在活跃时间段内，取消视觉 API 调用以节省 token"
@@ -3341,11 +3364,8 @@ class ScreenCompanion(Star):
             
             # 休息提醒（如果在休息提醒时间）
             if self._is_in_rest_reminder_range():
-                import datetime
                 interaction_prompt += "\n休息提醒：只有当任务相关建议不足，且确实出现疲劳迹象时，才轻轻带一句休息提醒。"
                 logger.info(f"[任务 {task_id}] 当前处于休息提醒时间，已附加休息提醒")
-                # 更新最后提醒时间，设置冷却
-                self.last_rest_reminder_time = datetime.datetime.now()
             
             # 同伴响应指南（格式和风格指导）
             interaction_prompt += "\n\n" + self._build_companion_response_guide(
@@ -4501,7 +4521,13 @@ class ScreenCompanion(Star):
             return False
 
     def _is_in_rest_reminder_range(self):
-        """检查当前是否处于休息提醒区间。"""
+        """检查当前是否处于休息提醒区间。
+        
+        休息提醒逻辑：
+        - 只在休息时间段内提醒
+        - 以4点作为每日结束时间点，如果当前时间>=4点，则不再提醒休息
+        - 例如：休息时间为02:00-06:00，则在02:00-04:00之间提醒，04:00-06:00不提醒
+        """
         # 使用配置中的休息时间段
         time_range = self.rest_time_range
 
@@ -4511,7 +4537,15 @@ class ScreenCompanion(Star):
         try:
             import datetime
 
-            now = datetime.datetime.now().time()
+            now = datetime.datetime.now()
+            current_hour = now.hour
+            current_minute = now.minute
+            
+            # 如果当前时间已经>=4点，则不再提醒休息（每日结束时间点）
+            if current_hour >= 4:
+                return False
+
+            now_time = now.time()
             start_str, end_str = time_range.split("-")
             start_hour, start_minute = map(int, start_str.split(":"))
             end_hour, end_minute = map(int, end_str.split(":"))
@@ -4521,17 +4555,16 @@ class ScreenCompanion(Star):
 
             # 只在休息时间内提醒，不在休息时间前提醒
             if start_time <= end_time:
-                in_rest_time = start_time <= now <= end_time
+                in_rest_time = start_time <= now_time <= end_time
             else:
                 # 跨午夜的情况
-                in_rest_time = now >= start_time or now <= end_time
+                in_rest_time = now_time >= start_time or now_time <= end_time
 
             # 检查冷却时间
             if in_rest_time:
-                current_time = datetime.datetime.now()
                 last_reminder_time = getattr(self, "last_rest_reminder_time", None)
                 if last_reminder_time:
-                    time_diff = (current_time - last_reminder_time).total_seconds() / 60
+                    time_diff = (now - last_reminder_time).total_seconds() / 60
                     if time_diff < 30:
                         return False
                 return True
@@ -5463,6 +5496,12 @@ class ScreenCompanion(Star):
                                                 target, MessageChain([Plain(message)])
                                             )
                                             logger.info("自定义任务提醒消息发送成功")
+                                            
+                                            # 如果处于休息提醒时间，更新冷却时间
+                                            if self._is_in_rest_reminder_range():
+                                                import datetime
+                                                self.last_rest_reminder_time = datetime.datetime.now()
+                                                logger.info(f"[自定义任务] 已更新休息提醒冷却时间")
                                 finally:
                                     # 任务完成后清理临时任务
                                     if temp_task_id in self.temporary_tasks:
@@ -5763,6 +5802,12 @@ class ScreenCompanion(Star):
 
                         # 添加日记条目
                         self._add_diary_entry(text_content, active_window_title)
+
+                        # 如果处于休息提醒时间，更新冷却时间
+                        if self._is_in_rest_reminder_range():
+                            import datetime
+                            self.last_rest_reminder_time = datetime.datetime.now()
+                            logger.info(f"[任务 {task_id}] 已更新休息提醒冷却时间")
 
                         # 自动分段发送，参考 splitter 插件的思路
                         if text_content:
