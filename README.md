@@ -1,6 +1,8 @@
 # 我会一直看着你
 
-`astrbot_plugin_screen_companion` 是面向 AstrBot 的屏幕伙伴插件。它结合截图、录屏、多模态识别、长期记忆、日记和 WebUI，在你使用电脑时提供更自然的观察、陪伴和回顾能力。如果喜欢的话请给个 star 吧。
+`astrbot_plugin_screen_companion` 是面向 AstrBot 的屏幕伙伴插件。它结合截图、录屏、多模态识别、长期记忆、日记和 WebUI，在你使用电脑时提供更自然的观察、陪伴和回顾能力。
+
+基本功能已经完善，现已转入维护阶段，如果喜欢的话请给个 star 吧。
 
 ## 版本
 
