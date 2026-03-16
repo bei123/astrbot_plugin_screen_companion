@@ -182,18 +182,29 @@ class ScreenCompanion(Star):
                 name="screen_recording_bootstrap",
             )
 
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def _get_runtime_flag(self, name: str, default: bool = False) -> bool:
+        return self._coerce_bool(getattr(self, name, default))
+
     def _sync_all_config(self) -> None:
         """将配置对象同步到插件运行时字段。"""
         # 同步基础配置
         self.bot_name = self.plugin_config.bot_name
-        self.enabled = self.plugin_config.enabled
+        self.enabled = self._coerce_bool(self.plugin_config.enabled)
         self.interaction_mode = self.plugin_config.interaction_mode
         self.check_interval = self.plugin_config.check_interval
         self.trigger_probability = self.plugin_config.trigger_probability
         self.active_time_range = self.plugin_config.active_time_range
-        self.use_companion_mode = self.plugin_config.use_companion_mode
+        self.use_companion_mode = self._coerce_bool(self.plugin_config.use_companion_mode)
         self.companion_prompt = getattr(self.plugin_config, 'companion_prompt', '你是用户的专属屏幕伙伴，专注于提供持续、自然的陪伴。请保持对话的连续性，关注用户的任务进展，提供具体、实用的建议。')
-        self.capture_active_window = self.plugin_config.capture_active_window
+        self.capture_active_window = self._coerce_bool(self.plugin_config.capture_active_window)
         self.bot_vision_quality = self.plugin_config.bot_vision_quality
         self.screen_recognition_mode = self._normalize_screen_recognition_mode(
             getattr(
@@ -218,9 +229,11 @@ class ScreenCompanion(Star):
                 or self.RECORDING_DURATION_SECONDS
             ),
         )
-        self.use_external_vision = self.plugin_config.use_external_vision
-        self.allow_unsafe_video_direct_fallback = getattr(
-            self.plugin_config, "allow_unsafe_video_direct_fallback", False
+        self.use_external_vision = self._coerce_bool(
+            getattr(self.plugin_config, "use_external_vision", False)
+        )
+        self.allow_unsafe_video_direct_fallback = self._coerce_bool(
+            getattr(self.plugin_config, "allow_unsafe_video_direct_fallback", False)
         )
         self.vision_api_url = self.plugin_config.vision_api_url
         self.vision_api_key = self.plugin_config.vision_api_key
@@ -230,43 +243,50 @@ class ScreenCompanion(Star):
         self.vision_api_key_backup = getattr(self.plugin_config, 'vision_api_key_backup', None)
         self.vision_api_model_backup = getattr(self.plugin_config, 'vision_api_model_backup', None)
         self.user_preferences = self.plugin_config.user_preferences
-        self.use_llm_for_start_end = self.plugin_config.use_llm_for_start_end
+        self.use_llm_for_start_end = self._coerce_bool(self.plugin_config.use_llm_for_start_end)
         self.start_preset = self.plugin_config.start_preset
         self.end_preset = self.plugin_config.end_preset
         self.start_llm_prompt = self.plugin_config.start_llm_prompt
         self.end_llm_prompt = self.plugin_config.end_llm_prompt
-        self.enable_diary = self.plugin_config.enable_diary
-        self.diary_time = self.plugin_config.diary_time
+        self.enable_diary = self._coerce_bool(self.plugin_config.enable_diary)
+        raw_diary_time = getattr(self.plugin_config, "diary_time", "00:00")
+        normalized_diary_time = self._normalize_clock_text(
+            raw_diary_time,
+            default="00:00",
+        )
+        self.diary_time = normalized_diary_time
+        if normalized_diary_time != raw_diary_time:
+            self.plugin_config.diary_time = normalized_diary_time
         self.diary_storage = self.plugin_config.diary_storage
         self.diary_reference_days = self.plugin_config.diary_reference_days
-        self.diary_auto_recall = self.plugin_config.diary_auto_recall
+        self.diary_auto_recall = self._coerce_bool(self.plugin_config.diary_auto_recall)
         self.diary_recall_time = self.plugin_config.diary_recall_time
-        self.diary_send_as_image = self.plugin_config.diary_send_as_image
+        self.diary_send_as_image = self._coerce_bool(self.plugin_config.diary_send_as_image)
         self.diary_generation_prompt = self.plugin_config.diary_generation_prompt
         self.weather_api_key = self.plugin_config.weather_api_key
         self.weather_city = self.plugin_config.weather_city
-        self.enable_mic_monitor = self.plugin_config.enable_mic_monitor
+        self.enable_mic_monitor = self._coerce_bool(self.plugin_config.enable_mic_monitor)
         self.mic_threshold = self.plugin_config.mic_threshold
         self.mic_check_interval = self.plugin_config.mic_check_interval
         self.admin_qq = self.plugin_config.admin_qq
         self.proactive_target = self.plugin_config.proactive_target
-        self.save_local = self.plugin_config.save_local
+        self.save_local = self._coerce_bool(self.plugin_config.save_local)
         self.enable_natural_language_screen_assist = (
-            self.plugin_config.enable_natural_language_screen_assist
+            self._coerce_bool(self.plugin_config.enable_natural_language_screen_assist)
         )
-        self.enable_window_companion = self.plugin_config.enable_window_companion
+        self.enable_window_companion = self._coerce_bool(self.plugin_config.enable_window_companion)
         self.window_companion_targets = self.plugin_config.window_companion_targets
         self.window_companion_check_interval = (
             self.plugin_config.window_companion_check_interval
         )
-        self.use_shared_screenshot_dir = self.plugin_config.use_shared_screenshot_dir
+        self.use_shared_screenshot_dir = self._coerce_bool(self.plugin_config.use_shared_screenshot_dir)
         self.shared_screenshot_dir = self.plugin_config.shared_screenshot_dir
         self.custom_tasks = self.plugin_config.custom_tasks
         self.rest_time_range = self.plugin_config.rest_time_range
-        self.enable_learning = self.plugin_config.enable_learning
+        self.enable_learning = self._coerce_bool(self.plugin_config.enable_learning)
         self.learning_storage = self.plugin_config.learning_storage
         self.interaction_kpi = self.plugin_config.interaction_kpi
-        self.debug = self.plugin_config.debug
+        self.debug = self._coerce_bool(self.plugin_config.debug)
         self.custom_presets = self.plugin_config.custom_presets
         self.current_preset_index = self.plugin_config.current_preset_index
         self._parse_custom_presets()
@@ -283,7 +303,7 @@ class ScreenCompanion(Star):
         self.bot_appearance = self.plugin_config.bot_appearance
 
         # 同步 WebUI 配置
-        self.webui_enabled = self.plugin_config.webui.enabled
+        self.webui_enabled = self._coerce_bool(self.plugin_config.webui.enabled)
         self.webui_host = self.plugin_config.webui.host
         normalized_port = self._normalize_webui_port(self.plugin_config.webui.port)
         if normalized_port != self.plugin_config.webui.port:
@@ -291,10 +311,10 @@ class ScreenCompanion(Star):
             self.plugin_config.save_webui_config()
         # 确保使用标准化后的端口值
         self.webui_port = normalized_port
-        self.webui_auth_enabled = self.plugin_config.webui.auth_enabled
+        self.webui_auth_enabled = self._coerce_bool(self.plugin_config.webui.auth_enabled)
         self.webui_password = self.plugin_config.webui.password
         self.webui_session_timeout = self.plugin_config.webui.session_timeout
-        self.webui_allow_external_api = self.plugin_config.webui.allow_external_api
+        self.webui_allow_external_api = self._coerce_bool(self.plugin_config.webui.allow_external_api)
         self._parse_window_companion_targets()
 
     def _normalize_webui_port(self, port) -> int:
@@ -617,6 +637,77 @@ class ScreenCompanion(Star):
         return await self._send_proactive_message(
             target, MessageChain([Plain(text)])
         )
+
+    def _resolve_proactive_target(self, fallback_event: Any = None) -> str:
+        target = self._get_default_target()
+        if not target and fallback_event is not None:
+            try:
+                target = str(getattr(fallback_event, "unified_msg_origin", "") or "").strip()
+            except Exception as e:
+                logger.debug(f"读取回退主动消息目标失败: {e}")
+        return self._normalize_target(target)
+
+    def _build_message_chain(
+        self, components: list[BaseMessageComponent] | None
+    ) -> MessageChain:
+        chain = MessageChain()
+        for comp in components or []:
+            chain.chain.append(comp)
+        return chain
+
+    def _extract_plain_text(
+        self, components: list[BaseMessageComponent] | None
+    ) -> str:
+        chunks: list[str] = []
+        for comp in components or []:
+            if isinstance(comp, Plain):
+                text = str(getattr(comp, "text", "") or "")
+                if text:
+                    chunks.append(text)
+        return "".join(chunks)
+
+    async def _send_component_text(
+        self,
+        target: str,
+        components: list[BaseMessageComponent] | None,
+        *,
+        prefix: str = "",
+    ) -> bool:
+        text = self._extract_plain_text(components)
+        if not text:
+            return False
+        if prefix:
+            text = f"{prefix}\n{text}"
+        return await self._send_plain_message(target, text)
+
+    async def _send_segmented_text(
+        self,
+        target: str,
+        text: str,
+        *,
+        max_length: int = 1000,
+        delay_seconds: float = 0.5,
+        should_continue: Any = None,
+    ) -> bool:
+        target = str(target or "").strip()
+        text = str(text or "").strip()
+        if not target or not text:
+            return False
+
+        segments = self._split_message(text, max_length=max_length)
+        if not segments:
+            return False
+
+        sent = False
+        for index, segment in enumerate(segments):
+            if should_continue is not None and not should_continue():
+                break
+            if not segment.strip():
+                continue
+            sent = await self._send_plain_message(target, segment) or sent
+            if index < len(segments) - 1 and delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+        return sent
 
     def _build_window_companion_prompt(self, window_title: str, extra_prompt: str = "") -> str:
         """Build a focused prompt for window companion sessions."""
@@ -966,6 +1057,64 @@ class ScreenCompanion(Star):
             == self.RECORDING_MODE
         )
 
+    @staticmethod
+    def _normalize_clock_text(value: Any, default: str = "00:00") -> str:
+        text = str(value or "").strip()
+        if not text:
+            return default
+        try:
+            hour_text, minute_text = text.split(":", 1)
+            hour = int(hour_text)
+            minute = int(minute_text)
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return f"{hour:02d}:{minute:02d}"
+        except Exception:
+            pass
+        return default
+
+    @staticmethod
+    def _resolve_diary_target_date(
+        now: datetime.datetime | None = None,
+        *,
+        early_morning_cutoff_hour: int = 2,
+    ) -> datetime.date:
+        current = now or datetime.datetime.now()
+        target_date = current.date()
+        if current.hour < max(0, int(early_morning_cutoff_hour)):
+            target_date -= datetime.timedelta(days=1)
+        return target_date
+
+    def _get_capture_context_timeout(self, media_kind: str | None = None) -> float:
+        normalized_kind = str(media_kind or "").strip().lower()
+        if not normalized_kind:
+            normalized_kind = "video" if self._use_screen_recording_mode() else "image"
+        if normalized_kind == "video":
+            duration = self._get_recording_duration_seconds()
+            return float(max(duration + 35, 60))
+        return 20.0
+
+    def _get_interaction_timeout(
+        self, media_kind: str, use_external_vision: bool
+    ) -> float:
+        normalized_kind = str(media_kind or "image").strip().lower()
+        if normalized_kind == "video":
+            return 300.0 if use_external_vision else 360.0
+        return 180.0 if use_external_vision else 240.0
+
+    def _get_screen_analysis_timeout(
+        self,
+        media_kind: str,
+        use_external_vision: bool | None = None,
+    ) -> float:
+        if use_external_vision is None:
+            use_external_vision = self._get_runtime_flag("use_external_vision")
+        interaction_timeout = self._get_interaction_timeout(
+            media_kind,
+            bool(use_external_vision),
+        )
+        base_timeout = 120.0 if str(media_kind or "image").strip().lower() == "video" else 45.0
+        return interaction_timeout + base_timeout
+
     async def _handle_screen_recognition_mode_change(self) -> None:
         self._ensure_runtime_state()
         if self._use_screen_recording_mode():
@@ -1209,6 +1358,12 @@ class ScreenCompanion(Star):
             [
                 "-t",
                 str(duration),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "32",
                 "-pix_fmt",
                 "yuv420p",
                 output_path,
@@ -1284,6 +1439,12 @@ class ScreenCompanion(Star):
             [
                 "-t",
                 str(self._get_recording_duration_seconds()),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "32",
                 "-pix_fmt",
                 "yuv420p",
                 output_path,
@@ -1756,14 +1917,14 @@ class ScreenCompanion(Star):
                 close_in_time = (
                     entry_minutes is not None
                     and last_minutes is not None
-                    and entry_minutes - last_minutes <= 18
+                    and 0 <= entry_minutes - last_minutes <= 12
                 )
                 similar_to_previous = self._is_similar_record(
                     normalized_text,
                     previous.get("last_text", ""),
-                    threshold=0.72,
+                    threshold=0.82,
                 )
-                if same_window and (close_in_time or similar_to_previous):
+                if same_window and close_in_time and similar_to_previous:
                     previous["end_time"] = time_text
                     previous["last_minutes"] = entry_minutes
                     if not previous["points"] or not self._is_similar_record(
@@ -3215,7 +3376,7 @@ class ScreenCompanion(Star):
             import os
             from PIL import Image
 
-            shared_dir_enabled = bool(getattr(self, "use_shared_screenshot_dir", False))
+            shared_dir_enabled = self._get_runtime_flag("use_shared_screenshot_dir")
             configured_shared_dir = str(getattr(self, "shared_screenshot_dir", "") or "").strip()
 
             def resolve_shared_screenshot_dir() -> str:
@@ -4013,7 +4174,7 @@ class ScreenCompanion(Star):
         if native_response is not None:
             return native_response
 
-        if media_kind == "video" and not bool(
+        if media_kind == "video" and not self._coerce_bool(
             getattr(self, "allow_unsafe_video_direct_fallback", False)
         ):
             raise RuntimeError(
@@ -4064,23 +4225,36 @@ class ScreenCompanion(Star):
         custom_prompt: str = "",
         history_user_text: str = "/kp",
         capture_context: dict[str, Any] | None = None,
-        capture_timeout: float = 20.0,
+        capture_timeout: float | None = None,
+        analysis_timeout: float | None = None,
     ) -> str | None:
         debug_mode = self.debug
         if debug_mode:
             logger.info(f"[Task {task_id}] status update")
 
         if capture_context is None:
+            effective_capture_timeout = (
+                float(capture_timeout)
+                if capture_timeout is not None
+                else self._get_capture_context_timeout()
+            )
             capture_context = await asyncio.wait_for(
-                self._capture_recognition_context(), timeout=capture_timeout
+                self._capture_recognition_context(),
+                timeout=effective_capture_timeout,
             )
         media_bytes = capture_context["media_bytes"]
+        media_kind = str(capture_context.get("media_kind", "image") or "image")
         active_window_title = capture_context.get("active_window_title", "")
         if debug_mode:
             logger.info(
-                f"[{task_id}] 识屏素材已准备，模式: {capture_context.get('media_kind')}, 大小: {len(media_bytes)} bytes, 活动窗口: {active_window_title}"
+                f"[{task_id}] 识屏素材已准备，模式: {media_kind}, 大小: {len(media_bytes)} bytes, 活动窗口: {active_window_title}"
             )
 
+        effective_analysis_timeout = (
+            float(analysis_timeout)
+            if analysis_timeout is not None
+            else self._get_screen_analysis_timeout(media_kind)
+        )
         components = await asyncio.wait_for(
             self._analyze_screen(
                 capture_context,
@@ -4089,7 +4263,7 @@ class ScreenCompanion(Star):
                 custom_prompt=custom_prompt,
                 task_id=task_id,
             ),
-            timeout=300.0,  # 进一步增加超时时间，以处理主API和备用API的调用以及LLM调用
+            timeout=effective_analysis_timeout,
         )
         if debug_mode:
             logger.info(f"[{task_id}] 分析完成，组件数量: {len(components)}")
@@ -4176,7 +4350,7 @@ class ScreenCompanion(Star):
 
             return True, ""
         except Exception as e:
-            if bool(getattr(self, "use_shared_screenshot_dir", False)):
+            if self._get_runtime_flag("use_shared_screenshot_dir"):
                 shared_dir = str(getattr(self, "shared_screenshot_dir", "") or "").strip()
                 if shared_dir:
                     return True, ""
@@ -4440,38 +4614,12 @@ class ScreenCompanion(Star):
                 logger.debug(f"天气感知失败: {e}")
         return weather_prompt
 
-    async def _analyze_screen(
+    async def _gather_screen_analysis_context(
         self,
-        capture_context: dict[str, Any],
-        session=None,
-        active_window_title: str = "",
-        custom_prompt: str = "",
-        task_id: str = "unknown",
-    ) -> list[BaseMessageComponent]:
-        """Analyze the current screenshot or recording context and generate a reply."""
-        if self._is_in_rest_time_range():
-            logger.info(f"[任务 {task_id}] 当前处于休息时段，跳过识屏。")
-            return []
-
-        if not self._is_in_active_time_range():
-            logger.info(f"[任务 {task_id}] 当前不在主动互动时段，跳过识屏。")
-            return []
-
-        provider = self.context.get_using_provider()
-        if not provider:
-            return [Plain("当前没有可用的 AstrBot 模型提供方。")]
-
-        umo = None
-        if session and hasattr(session, "unified_msg_origin"):
-            umo = session.unified_msg_origin
-
-        system_prompt = await self._get_persona_prompt(umo)
-        debug_mode = self.debug
-        media_kind = str(capture_context.get("media_kind", "image") or "image")
-        mime_type = str(capture_context.get("mime_type", "image/jpeg") or "image/jpeg")
-        media_bytes = capture_context.get("media_bytes", b"") or b""
-        use_external_vision = bool(getattr(self, "use_external_vision", True))
-
+        *,
+        active_window_title: str,
+        debug_mode: bool,
+    ) -> dict[str, str]:
         scene = "未知"
         scene_prompt = ""
         time_prompt = ""
@@ -4511,33 +4659,160 @@ class ScreenCompanion(Star):
             if debug_mode:
                 logger.debug(f"获取天气提示失败: {e}")
 
+        return {
+            "scene": scene,
+            "scene_prompt": scene_prompt,
+            "time_prompt": time_prompt,
+            "holiday_prompt": holiday_prompt,
+            "system_status_prompt": system_status_prompt,
+            "weather_prompt": weather_prompt,
+        }
+
+    async def _collect_recent_conversation_context(
+        self,
+        session=None,
+        *,
+        debug_mode: bool,
+    ) -> list[str]:
         contexts: list[str] = []
         try:
-            if hasattr(self.context, "conversation_manager"):
-                conv_mgr = self.context.conversation_manager
-                uid = ""
-                try:
-                    uid = session.unified_msg_origin if session else ""
-                except Exception as e:
-                    if debug_mode:
-                        logger.debug(f"读取会话 UID 失败: {e}")
-                if uid:
-                    try:
-                        curr_cid = await conv_mgr.get_curr_conversation_id(uid)
-                        if curr_cid:
-                            conversation = await conv_mgr.get_conversation(uid, curr_cid)
-                            if conversation and conversation.history:
-                                for msg in conversation.history[-5:]:
-                                    if msg.get("role") in {"user", "assistant"}:
-                                        content = str(msg.get("content", "") or "").strip()
-                                        if content:
-                                            contexts.append(content)
-                    except Exception as e:
-                        if debug_mode:
-                            logger.debug(f"读取对话上下文失败: {e}")
+            if not hasattr(self.context, "conversation_manager"):
+                return contexts
+
+            conv_mgr = self.context.conversation_manager
+            uid = ""
+            try:
+                uid = session.unified_msg_origin if session else ""
+            except Exception as e:
+                if debug_mode:
+                    logger.debug(f"读取会话 UID 失败: {e}")
+
+            if not uid:
+                return contexts
+
+            try:
+                curr_cid = await conv_mgr.get_curr_conversation_id(uid)
+                if curr_cid:
+                    conversation = await conv_mgr.get_conversation(uid, curr_cid)
+                    if conversation and conversation.history:
+                        for msg in conversation.history[-5:]:
+                            if msg.get("role") in {"user", "assistant"}:
+                                content = str(msg.get("content", "") or "").strip()
+                                if content:
+                                    contexts.append(content)
+            except Exception as e:
+                if debug_mode:
+                    logger.debug(f"读取对话上下文失败: {e}")
         except Exception as e:
             if debug_mode:
                 logger.debug(f"收集上下文失败: {e}")
+        return contexts
+
+    async def _recognize_screen_material(
+        self,
+        *,
+        capture_context: dict[str, Any],
+        use_external_vision: bool,
+        scene: str,
+        active_window_title: str,
+    ) -> str:
+        if not use_external_vision:
+            return ""
+
+        recognition_text = await self._call_external_vision_api(
+            capture_context.get("media_bytes", b"") or b"",
+            media_kind=str(capture_context.get("media_kind", "image") or "image"),
+            mime_type=str(capture_context.get("mime_type", "image/jpeg") or "image/jpeg"),
+            scene=scene,
+            active_window_title=active_window_title,
+        )
+        return self._compress_recognition_text(recognition_text)
+
+    async def _request_screen_interaction(
+        self,
+        *,
+        provider: Any,
+        use_external_vision: bool,
+        interaction_prompt: str,
+        system_prompt: str,
+        media_bytes: bytes,
+        media_kind: str,
+        mime_type: str,
+        umo: str | None,
+    ) -> Any:
+        timeout_seconds = self._get_interaction_timeout(
+            media_kind,
+            use_external_vision,
+        )
+        if use_external_vision:
+            return await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=interaction_prompt,
+                    system_prompt=system_prompt,
+                ),
+                timeout=timeout_seconds,
+            )
+
+        return await asyncio.wait_for(
+            self._call_provider_multimodal_direct(
+                provider=provider,
+                interaction_prompt=interaction_prompt,
+                system_prompt=system_prompt,
+                media_bytes=media_bytes,
+                media_kind=media_kind,
+                mime_type=mime_type,
+                provider_id=await self._get_current_chat_provider_id(umo=umo),
+            ),
+            timeout=timeout_seconds,
+        )
+
+    async def _analyze_screen(
+        self,
+        capture_context: dict[str, Any],
+        session=None,
+        active_window_title: str = "",
+        custom_prompt: str = "",
+        task_id: str = "unknown",
+    ) -> list[BaseMessageComponent]:
+        """Analyze the current screenshot or recording context and generate a reply."""
+        if self._is_in_rest_time_range():
+            logger.info(f"[任务 {task_id}] 当前处于休息时段，跳过识屏。")
+            return []
+
+        if not self._is_in_active_time_range():
+            logger.info(f"[任务 {task_id}] 当前不在主动互动时段，跳过识屏。")
+            return []
+
+        provider = self.context.get_using_provider()
+        if not provider:
+            return [Plain("当前没有可用的 AstrBot 模型提供方。")]
+
+        umo = None
+        if session and hasattr(session, "unified_msg_origin"):
+            umo = session.unified_msg_origin
+
+        system_prompt = await self._get_persona_prompt(umo)
+        debug_mode = self._get_runtime_flag("debug")
+        media_kind = str(capture_context.get("media_kind", "image") or "image")
+        mime_type = str(capture_context.get("mime_type", "image/jpeg") or "image/jpeg")
+        media_bytes = capture_context.get("media_bytes", b"") or b""
+        use_external_vision = self._get_runtime_flag("use_external_vision")
+
+        analysis_context = await self._gather_screen_analysis_context(
+            active_window_title=active_window_title,
+            debug_mode=debug_mode,
+        )
+        scene = analysis_context["scene"]
+        scene_prompt = analysis_context["scene_prompt"]
+        time_prompt = analysis_context["time_prompt"]
+        holiday_prompt = analysis_context["holiday_prompt"]
+        system_status_prompt = analysis_context["system_status_prompt"]
+        weather_prompt = analysis_context["weather_prompt"]
+
+        contexts = await self._collect_recent_conversation_context(
+            session,
+            debug_mode=debug_mode,
+        )
 
         try:
             if debug_mode:
@@ -4547,17 +4822,12 @@ class ScreenCompanion(Star):
                 logger.debug(f"Mime type: {mime_type}")
                 logger.debug(f"Media size: {len(media_bytes)} bytes")
 
-            if use_external_vision:
-                recognition_text = await self._call_external_vision_api(
-                    media_bytes,
-                    media_kind=media_kind,
-                    mime_type=mime_type,
-                    scene=scene,
-                    active_window_title=active_window_title,
-                )
-                recognition_text = self._compress_recognition_text(recognition_text)
-            else:
-                recognition_text = ""
+            recognition_text = await self._recognize_screen_material(
+                capture_context=capture_context,
+                use_external_vision=use_external_vision,
+                scene=scene,
+                active_window_title=active_window_title,
+            )
 
             material_label = "录屏视频" if media_kind == "video" else "截图"
             prompt_parts: list[str] = []
@@ -4651,27 +4921,16 @@ class ScreenCompanion(Star):
             interaction_prompt = "\n\n".join(part for part in prompt_parts if part)
 
             try:
-                if use_external_vision:
-                    interaction_response = await asyncio.wait_for(
-                        provider.text_chat(
-                            prompt=interaction_prompt,
-                            system_prompt=system_prompt,
-                        ),
-                        timeout=180.0,
-                    )
-                else:
-                    interaction_response = await asyncio.wait_for(
-                        self._call_provider_multimodal_direct(
-                            provider=provider,
-                            interaction_prompt=interaction_prompt,
-                            system_prompt=system_prompt,
-                            media_bytes=media_bytes,
-                            media_kind=media_kind,
-                            mime_type=mime_type,
-                            provider_id=await self._get_current_chat_provider_id(umo=umo),
-                        ),
-                        timeout=180.0,
-                    )
+                interaction_response = await self._request_screen_interaction(
+                    provider=provider,
+                    use_external_vision=use_external_vision,
+                    interaction_prompt=interaction_prompt,
+                    system_prompt=system_prompt,
+                    media_bytes=media_bytes,
+                    media_kind=media_kind,
+                    mime_type=mime_type,
+                    umo=umo,
+                )
             except asyncio.TimeoutError:
                 logger.error("LLM 响应超时")
                 return [Plain("这次识屏响应超时了，请稍后再试。")]
@@ -4807,15 +5066,17 @@ class ScreenCompanion(Star):
             return
 
         try:
+            duration = self._get_recording_duration_seconds()
+            capture_timeout = self._get_capture_context_timeout("video")
             yield event.plain_result(
-                f"\u6b63\u5728\u5f55\u5236 {self._get_recording_duration_seconds()} \u79d2\u684c\u9762..."
+                f"\u5f00\u59cb\u5f55\u5236\u6700\u8fd1 {duration} \u79d2\u684c\u9762\u753b\u9762\u4e86\u3002\n"
+                "\u5f55\u5236\u5b8c\u6210\u540e\u6211\u4f1a\u7ee7\u7eed\u5206\u6790\u5185\u5bb9\uff0c\u6574\u4e2a\u8fc7\u7a0b\u4f1a\u6bd4 /kp \u6162\u4e00\u4e9b\u3002"
             )
             capture_context = await asyncio.wait_for(
-                self._capture_one_shot_recording_context(
-                    self._get_recording_duration_seconds()
-                ),
-                timeout=float(self._get_recording_duration_seconds() + 45),
+                self._capture_one_shot_recording_context(duration),
+                timeout=capture_timeout,
             )
+            yield event.plain_result("\u5f55\u5236\u5b8c\u6210\uff0c\u6b63\u5728\u5206\u6790\u753b\u9762\u5185\u5bb9...")
 
             screen_result = await self._run_screen_assist(
                 event,
@@ -4823,10 +5084,11 @@ class ScreenCompanion(Star):
                 custom_prompt="",
                 history_user_text="/kpr",
                 capture_context=capture_context,
+                analysis_timeout=self._get_screen_analysis_timeout("video"),
             )
 
             if not screen_result:
-                yield event.plain_result("\u672a\u83b7\u53d6\u5230\u6709\u6548\u8bc6\u522b\u7ed3\u679c")
+                yield event.plain_result("\u8fd9\u6b21\u5f55\u5c4f\u6ca1\u6709\u62ff\u5230\u6709\u6548\u8bc6\u522b\u7ed3\u679c\uff0c\u53ef\u4ee5\u7a0d\u540e\u518d\u8bd5\u4e00\u6b21\u3002")
                 return
 
             segments = self._split_message(screen_result)
@@ -4847,7 +5109,11 @@ class ScreenCompanion(Star):
                 logger.info("\u5355\u6b21\u5f55\u5c4f\u6307\u4ee4\u5904\u7406\u5b8c\u6210")
         except asyncio.TimeoutError:
             logger.error("\u5355\u6b21\u5f55\u5c4f\u6216\u8bc6\u522b\u64cd\u4f5c\u8d85\u65f6")
-            yield event.plain_result("\u5355\u6b21\u5f55\u5c4f\u6216\u8bc6\u522b\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002")
+            yield event.plain_result(
+                "\u8fd9\u6b21 /kpr \u8d85\u65f6\u4e86\u3002\n"
+                f"\u5f53\u524d\u5f55\u5c4f\u65f6\u957f\u662f {self._get_recording_duration_seconds()} \u79d2\uff0c"
+                "\u5982\u679c\u8fd9\u4e2a\u95ee\u9898\u7ecf\u5e38\u51fa\u73b0\uff0c\u5efa\u8bae\u4f18\u5148\u7f29\u77ed\u5f55\u5c4f\u65f6\u957f\u6216\u964d\u4f4e\u5e27\u7387\u540e\u518d\u8bd5\u3002"
+            )
         except Exception as e:
             logger.error(f"\u5355\u6b21\u5f55\u5c4f\u8bc6\u522b\u5931\u8d25: {e}")
             import traceback
@@ -5709,7 +5975,12 @@ class ScreenCompanion(Star):
                 )
                 return
         else:
-            target_date = datetime.date.today()
+            now = datetime.datetime.now()
+            target_date = self._resolve_diary_target_date(now)
+            if now.hour < 2:
+                yield event.plain_result(
+                    f"当前时间还在凌晨两点前，默认补写 {target_date.strftime('%Y年%m月%d日')} 的日记。"
+                )
 
         # 检查这一天的日记是否已经存在
         diary_filename = f"diary_{target_date.strftime('%Y%m%d')}.md"
@@ -5945,17 +6216,17 @@ class ScreenCompanion(Star):
         self.diary_entries.append(entry)
         logger.info(f"添加日记条目: {entry}")
 
-    async def _generate_diary(self):
+    async def _generate_diary(self, target_date: datetime.date | None = None):
         """生成日记。"""
         if not self.enable_diary or not self.diary_entries:
             return
 
         import datetime
 
-        today = datetime.date.today()
+        target_date = target_date or datetime.date.today()
         # 获取星期
         weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-        weekday = weekdays[today.weekday()]
+        weekday = weekdays[target_date.weekday()]
 
         # 尝试获取天气信息
         weather_info = ""
@@ -5966,6 +6237,11 @@ class ScreenCompanion(Star):
 
         # 构建标准格式的日记内容
         compacted_entries = self._compact_diary_entries(self.diary_entries)
+        if not compacted_entries:
+            logger.info("今日日记没有可用的高质量观察条目，已跳过生成")
+            self.diary_entries = []
+            self.last_diary_date = target_date
+            return
         observation_lines = []
         for entry in compacted_entries:
             time_label = entry["start_time"] if entry["start_time"] == entry["end_time"] else f"{entry['start_time']}-{entry['end_time']}"
@@ -5982,7 +6258,7 @@ class ScreenCompanion(Star):
         import datetime
         viewed_count = 0
         for i in range(1, 4):
-            past_date = today - datetime.timedelta(days=i)
+            past_date = target_date - datetime.timedelta(days=i)
             past_date_str = past_date.strftime("%Y%m%d")
             if past_date_str in self.diary_metadata and self.diary_metadata[past_date_str].get("viewed", False):
                 viewed_count += 1
@@ -5992,7 +6268,7 @@ class ScreenCompanion(Star):
         # 生成带风格的今日日记总结
         provider = self.context.get_using_provider()
         if provider:
-            if len(self.diary_entries) < 2:
+            if len(compacted_entries) < 2:
                 summary_prompt = (
                     "今天的观察还比较少，请写一段简短、自然、不过度脑补的今日日记。"
                     "可以更克制一点，但仍然要保留一点真实感和陪伴感。"
@@ -6003,7 +6279,7 @@ class ScreenCompanion(Star):
                 reference_days = []
                 if self.diary_reference_days > 0:
                     for i in range(1, self.diary_reference_days + 1):
-                        past_date = today - datetime.timedelta(days=i)
+                        past_date = target_date - datetime.timedelta(days=i)
                         past_diary_filename = f"diary_{past_date.strftime('%Y%m%d')}.md"
                         past_diary_path = os.path.join(
                             self.diary_storage, past_diary_filename
@@ -6042,7 +6318,7 @@ class ScreenCompanion(Star):
                 logger.error(f"生成日记总结失败: {e}")
 
         diary_content = self._build_diary_document(
-            target_date=today,
+            target_date=target_date,
             weekday=weekday,
             weather_info=weather_info,
             observation_text=observation_text,
@@ -6050,7 +6326,7 @@ class ScreenCompanion(Star):
         )
 
         # 保存日记文件
-        diary_filename = f"diary_{today.strftime('%Y%m%d')}.md"
+        diary_filename = f"diary_{target_date.strftime('%Y%m%d')}.md"
         diary_path = os.path.join(self.diary_storage, diary_filename)
 
         try:
@@ -6060,7 +6336,7 @@ class ScreenCompanion(Star):
 
             # 重置日记条目
             self.diary_entries = []
-            self.last_diary_date = today
+            self.last_diary_date = target_date
 
             logger.info("日记生成完成，不自动发送，等待用户主动查看")
         except Exception as e:
@@ -6577,21 +6853,12 @@ class ScreenCompanion(Star):
                         # 定义临时任务函数
                         async def temp_mic_task():
                             try:
-                                # 创建一个虚拟 event 对象，用于传给 _analyze_screen
-                                class VirtualEvent:
-                                    def __init__(self):
-                                        self.unified_msg_origin = ""
-
-                                    def _get_default_target(self):
-                                        return ""
-
-                                # 绑定 config 到 VirtualEvent
-                                VirtualEvent.config = self.plugin_config
-
-                                event = self._create_virtual_event(self._get_default_target())
+                                target = self._resolve_proactive_target()
+                                event = self._create_virtual_event(target)
 
                                 capture_context = await asyncio.wait_for(
-                                    self._capture_recognition_context(), timeout=20.0
+                                    self._capture_recognition_context(),
+                                    timeout=self._get_capture_context_timeout(),
                                 )
                                 active_window_title = capture_context.get("active_window_title", "")
                                 components = await asyncio.wait_for(
@@ -6602,24 +6869,19 @@ class ScreenCompanion(Star):
                                         custom_prompt="我听到你刚才声音有点大，像是发生了什么，帮你看看现在的情况。",
                                         task_id=temp_task_id,
                                     ),
-                                    timeout=120.0,
+                                    timeout=self._get_screen_analysis_timeout(
+                                        capture_context.get("media_kind", "image")
+                                    ),
                                 )
 
                                 # 确定消息发送目标
-                                target = self._get_default_target()
+                                target = self._resolve_proactive_target()
 
-                                if target:
-                                    # 提取文本内容并发送
-                                    text_content = ""
-                                    for comp in components:
-                                        if isinstance(comp, Plain):
-                                            text_content += comp.text
-
-                                    if text_content:
-                                        message = f"【声音提醒】\n{text_content}"
-                                        await self._send_proactive_message(
-                                            target, MessageChain([Plain(message)])
-                                        )
+                                if target and await self._send_component_text(
+                                    target,
+                                    components,
+                                    prefix="【声音提醒】",
+                                ):
                                         logger.info("麦克风提醒消息发送成功")
 
                                 # 更新上次触发时间
@@ -6822,7 +7084,8 @@ class ScreenCompanion(Star):
                             async def temp_custom_task():
                                 try:
                                     capture_context = await asyncio.wait_for(
-                                        self._capture_recognition_context(), timeout=20.0
+                                        self._capture_recognition_context(),
+                                        timeout=self._get_capture_context_timeout(),
                                     )
                                     active_window_title = capture_context.get("active_window_title", "")
                                     components = await asyncio.wait_for(
@@ -6832,24 +7095,19 @@ class ScreenCompanion(Star):
                                             custom_prompt=task["prompt"],
                                             task_id=temp_task_id,
                                         ),
-                                        timeout=120.0,
+                                        timeout=self._get_screen_analysis_timeout(
+                                            capture_context.get("media_kind", "image")
+                                        ),
                                     )
 
                                     # 确定消息发送目标
-                                    target = self._get_default_target()
+                                    target = self._resolve_proactive_target()
 
-                                    if target:
-                                        # 提取文本内容并发送
-                                        text_content = ""
-                                        for comp in components:
-                                            if isinstance(comp, Plain):
-                                                text_content += comp.text
-
-                                        if text_content:
-                                            message = f"【定时提醒】\n{text_content}"
-                                            await self._send_proactive_message(
-                                                target, MessageChain([Plain(message)])
-                                            )
+                                    if target and await self._send_component_text(
+                                        target,
+                                        components,
+                                        prefix="【定时提醒】",
+                                    ):
                                             logger.info("自定义任务提醒消息发送成功")
                                             
                                             # 如果处于休息提醒时间，更新冷却时间
@@ -6890,13 +7148,17 @@ class ScreenCompanion(Star):
             try:
                 now = datetime.datetime.now()
                 today = now.date()
+                target_date = self._resolve_diary_target_date(now)
 
-                if self.enable_diary and self.last_diary_date != today:
+                if self.enable_diary and self.last_diary_date != target_date:
                     # 解析日记时间
                     try:
-                        hour, minute = map(int, self.diary_time.split(":"))
+                        hour, minute = map(
+                            int,
+                            self._normalize_clock_text(self.diary_time, "00:00").split(":"),
+                        )
                         if now.hour == hour and now.minute == minute:
-                            await self._generate_diary()
+                            await self._generate_diary(target_date=target_date)
                     except Exception as e:
                         logger.error(f"解析日记时间失败: {e}")
 
@@ -7095,7 +7357,8 @@ class ScreenCompanion(Star):
                             break
 
                         capture_context = await asyncio.wait_for(
-                            self._capture_recognition_context(), timeout=20.0
+                            self._capture_recognition_context(),
+                            timeout=self._get_capture_context_timeout(),
                         )
                         active_window_title = capture_context.get("active_window_title", "")
 
@@ -7114,7 +7377,9 @@ class ScreenCompanion(Star):
                                 custom_prompt=custom_prompt,
                                 task_id=task_id,
                             ),
-                            timeout=360.0,  # 增加超时时间到 360 秒，兼容视觉 API 和 LLM 调用
+                            timeout=self._get_screen_analysis_timeout(
+                                capture_context.get("media_kind", "image")
+                            ),
                         )
 
                         # 检查任务是否已停止
@@ -7124,38 +7389,9 @@ class ScreenCompanion(Star):
                             )
                             break
 
-                        chain = MessageChain()
-                        for comp in components:
-                            chain.chain.append(comp)
-
-                        # Determine the proactive message target
-                        target = self._get_default_target()
-                        if not target:
-                            admin_qq = self.admin_qq
-                            if admin_qq:
-                                # 使用管理员 QQ 构建消息目标
-                                target = self._build_private_target(admin_qq)
-                                logger.info(f"使用管理员 QQ 构建消息目标: {target}")
-                            else:
-                                # 回退到原始事件目标
-                                try:
-                                    target = event.unified_msg_origin
-                                    logger.info(f"使用原始事件目标: {target}")
-                                except Exception as e:
-                                    logger.error(f"获取原始事件目标失败: {e}")
-                                    # 使用默认目标
-                                    target = (
-                                        self._build_private_target(admin_qq)
-                                        if admin_qq
-                                        else ""
-                                    )
-                                    logger.info(f"使用默认目标: {target}")
-
-                        # 提取文本内容并按需分段发送
-                        text_content = ""
-                        for comp in components:
-                            if isinstance(comp, Plain):
-                                text_content += comp.text
+                        chain = self._build_message_chain(components)
+                        target = self._resolve_proactive_target(event)
+                        text_content = self._extract_plain_text(components)
 
                         # 添加日记条目
                         self._add_diary_entry(text_content, active_window_title)
@@ -7168,35 +7404,14 @@ class ScreenCompanion(Star):
 
                         # 自动分段发送，参考 splitter 插件的思路
                         if text_content:
-                            segments = self._split_message(text_content)
                             logger.info(
                                 f"准备发送主动消息，目标: {target}, 文本内容: {text_content}"
                             )
-                            if len(segments) > 1:
-                                for i in range(len(segments) - 1):
-                                    if not self.is_running:
-                                        break
-                                    segment = segments[i]
-                                    if segment.strip():
-                                        await self._send_proactive_message(
-                                            target,
-                                            MessageChain([Plain(segment)]),
-                                        )
-                                        await asyncio.sleep(0.5)
-                                if (
-                                    self.is_running
-                                    and segments[-1].strip()
-                                ):
-                                    await self._send_proactive_message(
-                                        target,
-                                        MessageChain([Plain(segments[-1])]),
-                                    )
-                            else:
-                                if self.is_running:
-                                    await self._send_proactive_message(
-                                        target,
-                                        MessageChain([Plain(text_content)]),
-                                    )
+                            await self._send_segmented_text(
+                                target,
+                                text_content,
+                                should_continue=lambda: self.is_running,
+                            )
                         else:
                             if self.is_running:
                                 await self._send_proactive_message(

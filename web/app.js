@@ -839,7 +839,9 @@ function parseDiaryObservationEntries(content) {
 
     for (const rawLine of lines) {
         const line = rawLine.trimEnd();
-        const match = line.match(/^###\s+(\d{2}:\d{2}(?::\d{2})?)\s*-\s*(.+)$/);
+        const match = line.match(
+            /^###\s+(\d{2}:\d{2}(?::\d{2})?(?:\s*-\s*\d{2}:\d{2}(?::\d{2})?)?)\s*-\s*(.+)$/
+        );
         if (match) {
             pushCurrent();
             current = {
@@ -1733,6 +1735,5 @@ window.addEventListener("DOMContentLoaded", async () => {
         setConnectionState("error", `初始化失败: ${error.message}`);
     }
 });
-
 
 

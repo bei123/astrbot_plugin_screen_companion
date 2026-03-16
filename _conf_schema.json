@@ -326,8 +326,8 @@
   "diary_time": {
     "description": "日记生成时间",
     "type": "string",
-    "hint": "每天生成日记的时间，格式为'HH:MM'，例如'22:00'。",
-    "default": "22:00",
+    "hint": "每天生成日记的时间，格式为'HH:MM'，例如'00:00'表示午夜12点。",
+    "default": "00:00",
     "condition": {
       "enabled": true,
       "enable_diary": true

@@ -60,6 +60,15 @@ class WebServer:
             logger.warning(f"WebUI 端口 {port} 是系统保留端口，可能需要管理员权限")
         return normalized
 
+    def _plugin_bool(self, name: str, default: bool = False) -> bool:
+        value = getattr(self.plugin, name, default)
+        coerce = getattr(self.plugin, "_coerce_bool", None)
+        if callable(coerce):
+            return coerce(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
     # === 响应辅助方法 ====
 
     @staticmethod
@@ -886,8 +895,8 @@ class WebServer:
         """Return basic config metadata."""
         try:
             return self._ok({
-            "version": "2.6.0",
-            "plugin_version": "2.6.0"
+            "version": "2.6.2",
+            "plugin_version": "2.6.2"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -1211,8 +1220,8 @@ class WebServer:
             {
                 "status": "ok",
                 "service": "screen-companion-webui",
-            "version": "2.6.0",
-            "plugin_version": "2.6.0",
+            "version": "2.6.2",
+            "plugin_version": "2.6.2",
                 "host": self.host,
                 "port": self.port,
                 "auth_enabled": bool(self._get_expected_secret()),
@@ -1242,8 +1251,8 @@ class WebServer:
         latest_video = self._build_latest_media_info("video")
 
         return {
-            "enabled": bool(getattr(self.plugin, "enabled", False)),
-            "is_running": bool(getattr(self.plugin, "is_running", False)),
+            "enabled": self._plugin_bool("enabled"),
+            "is_running": self._plugin_bool("is_running"),
             "state": getattr(self.plugin, "state", "unknown"),
             "active_task_count": len(getattr(self.plugin, "auto_tasks", {}) or {}),
             "temporary_task_count": len(getattr(self.plugin, "temporary_tasks", {}) or {}),
@@ -1256,17 +1265,17 @@ class WebServer:
             "rest_time_range": getattr(self.plugin, "rest_time_range", ""),
             "interaction_mode": getattr(self.plugin, "interaction_mode", ""),
             "interaction_frequency": getattr(self.plugin, "interaction_frequency", 0),
-            "enable_diary": bool(getattr(self.plugin, "enable_diary", False)),
-            "enable_learning": bool(getattr(self.plugin, "enable_learning", False)),
-            "enable_mic_monitor": bool(getattr(self.plugin, "enable_mic_monitor", False)),
-            "debug": bool(getattr(self.plugin, "debug", False)),
-            "save_local": bool(getattr(self.plugin, "save_local", False)),
+            "enable_diary": self._plugin_bool("enable_diary"),
+            "enable_learning": self._plugin_bool("enable_learning"),
+            "enable_mic_monitor": self._plugin_bool("enable_mic_monitor"),
+            "debug": self._plugin_bool("debug"),
+            "save_local": self._plugin_bool("save_local"),
             "screen_recognition_mode": bool(self.plugin._use_screen_recording_mode()),
-            "use_external_vision": bool(getattr(self.plugin, "use_external_vision", True)),
-            "use_shared_screenshot_dir": bool(getattr(self.plugin, "use_shared_screenshot_dir", False)),
+            "use_external_vision": self._plugin_bool("use_external_vision"),
+            "use_shared_screenshot_dir": self._plugin_bool("use_shared_screenshot_dir"),
             "shared_screenshot_dir": getattr(self.plugin, "shared_screenshot_dir", "") or "",
-            "enable_natural_language_screen_assist": bool(getattr(self.plugin, "enable_natural_language_screen_assist", False)),
-            "enable_window_companion": bool(getattr(self.plugin, "enable_window_companion", False)),
+            "enable_natural_language_screen_assist": self._plugin_bool("enable_natural_language_screen_assist"),
+            "enable_window_companion": self._plugin_bool("enable_window_companion"),
             "window_companion_targets": getattr(self.plugin, "window_companion_targets", "") or "",
             "window_companion_check_interval": int(getattr(self.plugin, "window_companion_check_interval", 5) or 5),
             "window_companion_active_title": getattr(self.plugin, "window_companion_active_title", "") or "",
@@ -1285,7 +1294,7 @@ class WebServer:
             if local_path.is_file():
                 return local_path, "local_snapshot"
 
-            if bool(getattr(self.plugin, "use_shared_screenshot_dir", False)):
+            if self._plugin_bool("use_shared_screenshot_dir"):
                 shared_dir = Path(str(getattr(self.plugin, "shared_screenshot_dir", "") or "").strip())
                 if shared_dir.is_dir():
                     candidates: list[Path] = []
@@ -1316,9 +1325,9 @@ class WebServer:
                 if kind == "image"
                 else "当前没有可预览的最新录屏。"
             )
-            if kind == "image" and not bool(getattr(self.plugin, "save_local", False)):
+            if kind == "image" and not self._plugin_bool("save_local"):
                 message = "未找到可预览的截图。可以开启素材留存，或使用共享截图目录模式。"
-            if kind == "video" and not bool(getattr(self.plugin, "save_local", False)):
+            if kind == "video" and not self._plugin_bool("save_local"):
                 message = "未找到可预览的录屏。建议开启素材留存后再查看最近录屏。"
             return {
                 "available": False,

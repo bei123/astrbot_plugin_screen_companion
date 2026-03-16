@@ -50,7 +50,7 @@ class PluginConfig(BaseModel):
     ffmpeg_path: str = ""
     recording_fps: float = 1.0
     recording_duration_seconds: int = 10
-    use_external_vision: bool = True
+    use_external_vision: bool = False
     allow_unsafe_video_direct_fallback: bool = False
     vision_api_url: str = ""
     vision_api_key: str = ""
@@ -66,7 +66,7 @@ class PluginConfig(BaseModel):
     start_llm_prompt: str = "以你的性格向用户表达你会开始偶尔地偷看用户的屏幕了，尽可能简短，保持在一句话内。"
     end_llm_prompt: str = "以你的性格向用户表达你停止看用户的屏幕了，尽可能简短，保持在一句话内。"
     enable_diary: bool = True
-    diary_time: str = "22:00"
+    diary_time: str = "00:00"
     diary_storage: str = ""
     diary_reference_days: int = 2
     diary_auto_recall: bool = False
@@ -226,8 +226,8 @@ class PluginConfig(BaseModel):
         if self.screen_recognition_mode and self.check_interval < self.recording_duration_seconds:
             raise ValueError(
                 f'录屏模式下，检查间隔不能小于录屏时长！\n'
-                f'当前配置：检查间隔 check_interval={self.check_interval}秒，录屏时长 recording_duration_seconds={self.recording_duration_seconds}秒\n'
-                f'建议：将 check_interval 设置为 >= recording_duration_seconds'
+                f'当前配置：检查间隔 {self.check_interval}秒，录屏时长 {self.recording_duration_seconds}秒\n'
+                f'建议：将 check_interval 设置为 >= {self.recording_duration_seconds}，或者减小 recording_duration_seconds'
             )
         return self
 
