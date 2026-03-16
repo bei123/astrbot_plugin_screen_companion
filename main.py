@@ -4807,17 +4807,15 @@ class ScreenCompanion(Star):
             return
 
         try:
-            capture_context = None
-            if not self._use_screen_recording_mode():
-                yield event.plain_result(
-                    f"\u5f53\u524d\u672a\u5f00\u542f\u5f55\u5c4f\u6a21\u5f0f\uff0c\u5c06\u5148\u5f55\u5236 {self._get_recording_duration_seconds()} \u79d2\u684c\u9762\u518d\u7ee7\u7eed\u8bc6\u522b\u3002"
-                )
-                capture_context = await asyncio.wait_for(
-                    self._capture_one_shot_recording_context(
-                        self._get_recording_duration_seconds()
-                    ),
-                    timeout=float(self._get_recording_duration_seconds() + 45),
-                )
+            yield event.plain_result(
+                f"\u6b63\u5728\u5f55\u5236 {self._get_recording_duration_seconds()} \u79d2\u684c\u9762..."
+            )
+            capture_context = await asyncio.wait_for(
+                self._capture_one_shot_recording_context(
+                    self._get_recording_duration_seconds()
+                ),
+                timeout=float(self._get_recording_duration_seconds() + 45),
+            )
 
             screen_result = await self._run_screen_assist(
                 event,

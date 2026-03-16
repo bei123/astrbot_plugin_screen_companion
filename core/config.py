@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from enum import Enum
 
 from astrbot.api import AstrBotConfig, logger
@@ -220,6 +220,16 @@ class PluginConfig(BaseModel):
         if v < 0:
             raise ValueError('interaction_kpi 不能小于 0')
         return v
+
+    @model_validator(mode='after')
+    def check_interval_vs_recording_duration(self):
+        if self.screen_recognition_mode and self.check_interval < self.recording_duration_seconds:
+            raise ValueError(
+                f'录屏模式下，检查间隔不能小于录屏时长！\n'
+                f'当前配置：检查间隔 check_interval={self.check_interval}秒，录屏时长 recording_duration_seconds={self.recording_duration_seconds}秒\n'
+                f'建议：将 check_interval 设置为 >= recording_duration_seconds'
+            )
+        return self
 
     # === 忽略额外字段 ===
     class Config:
