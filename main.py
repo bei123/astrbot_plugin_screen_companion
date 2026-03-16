@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from types import SimpleNamespace
@@ -27,13 +28,37 @@ from astrbot.api.star import Context, Star, StarTools
 from .web_server import WebServer
 from .core.config import PluginConfig
 
+_PROCESS_GUARD_LOCK = threading.Lock()
+_PROCESS_GUARDS: dict[str, float] = {}
+_ACTIVE_INSTANCE_TOKEN = ""
+
 
 class ScreenCompanion(Star):
+    LEGACY_DEFAULT_CUSTOM_TASK = "02:00 根据用户行为催促其尽快休息"
     DEFAULT_WEBUI_PORT = 6314
     SCREENSHOT_MODE = "screenshot"
     RECORDING_MODE = "recording"
     RECORDING_FPS = 1.0
     RECORDING_DURATION_SECONDS = 10
+    CHANGE_AWARE_IDLE_KEEPALIVE_SECONDS = 15 * 60
+    CHANGE_AWARE_SIMILAR_REPLY_COOLDOWN_SECONDS = 8 * 60
+    USER_ACTIVITY_GRACE_SECONDS = 45
+    USER_ACTIVITY_CHANGE_GRACE_SECONDS = 15
+    WORK_WINDOW_MESSAGE_COOLDOWN_SECONDS = 150
+    GENERAL_WINDOW_MESSAGE_COOLDOWN_SECONDS = 240
+    ENTERTAINMENT_WINDOW_MESSAGE_COOLDOWN_SECONDS = 360
+    CUSTOM_TASK_PROCESS_DEDUP_SECONDS = 90
+    BACKGROUND_SCREEN_GUARD_STALE_SECONDS = 5 * 60
+    SCREEN_ANALYSIS_FAILURE_BACKOFF_BASE_SECONDS = 30
+    SCREEN_ANALYSIS_FAILURE_BACKOFF_MAX_SECONDS = 5 * 60
+    SCREEN_TRACE_LIMIT = 40
+    LONG_TERM_MEMORY_RETENTION_DAYS = 45
+    LIGHT_MEMORY_RETENTION_DAYS = 90
+    EPISODIC_MEMORY_LIMIT = 120
+    FOCUS_PATTERN_LIMIT = 80
+    ACTIVITY_HISTORY_LIMIT = 1000
+    ACTIVITY_MIN_DURATION_SECONDS = 15
+    LIVE_ACTIVITY_MIN_DURATION_SECONDS = 5
     GEMINI_API_BASE = "https://generativelanguage.googleapis.com"
     GEMINI_FILE_POLL_TIMEOUT_SECONDS = 120
     GEMINI_FILE_POLL_INTERVAL_SECONDS = 2
@@ -46,6 +71,9 @@ class ScreenCompanion(Star):
         self.plugin_config = PluginConfig(config, context)
         
         self._sync_all_config()
+        self._instance_token = ""
+        self._register_process_instance()
+        self._cleanup_legacy_default_custom_tasks()
         
         self.auto_tasks = {}
         self.is_running = False
@@ -57,6 +85,8 @@ class ScreenCompanion(Star):
         self._screen_recording_path = ""
         self._recording_audio_device = None
         self._recording_ffmpeg_path = None
+        self._recording_video_encoder = None
+        self._recording_video_encoder_source = ""
         self.state = "inactive"  # active, inactive, temporary
         self.temporary_tasks = {}
         # 固定自动观察任务 ID
@@ -135,11 +165,16 @@ class ScreenCompanion(Star):
         self.previous_windows = set()
         self.window_change_cooldown = 0
         self.window_timestamps = {}  # 记录窗口首次出现的时间戳
+        self.auto_screen_runtime = {}
+        self.recent_user_activity = {}
+        self.screen_analysis_traces = []
         
         # 时间跟踪相关
         self.current_activity = None  # 当前活动
         self.activity_start_time = None  # 活动开始时间
         self.activity_history = []  # 活动历史记录
+        self.activity_history_file = os.path.join(self.learning_storage, "activity_history.json")
+        self._load_activity_history()
 
         self.uncertainty_words = ["也许", "可能", "看起来", "我猜", "像是", "大概", "说不定", "似乎"]
 
@@ -170,6 +205,8 @@ class ScreenCompanion(Star):
         self.background_tasks.append(task)
 
         task = asyncio.create_task(self._mic_monitor_task())
+        self.background_tasks.append(task)
+        task = asyncio.create_task(self._window_companion_task())
         self.background_tasks.append(task)
         self._shutdown_lock = asyncio.Lock()
         self._webui_lock = asyncio.Lock()
@@ -814,7 +851,7 @@ class ScreenCompanion(Star):
     async def _window_companion_task(self):
         """Watch configured windows and start or stop companion sessions automatically."""
         self._ensure_runtime_state()
-        while self.running:
+        while self.running and self._is_current_process_instance():
             interval = max(2, int(getattr(self, "window_companion_check_interval", 5) or 5))
             try:
                 if not self.enable_window_companion or not getattr(
@@ -1163,6 +1200,18 @@ class ScreenCompanion(Star):
             self.window_change_cooldown = 0
         if not hasattr(self, "window_timestamps") or self.window_timestamps is None:
             self.window_timestamps = {}
+        if not hasattr(self, "auto_screen_runtime") or self.auto_screen_runtime is None:
+            self.auto_screen_runtime = {}
+        if not hasattr(self, "recent_user_activity") or self.recent_user_activity is None:
+            self.recent_user_activity = {}
+        if not hasattr(self, "screen_analysis_traces") or self.screen_analysis_traces is None:
+            self.screen_analysis_traces = []
+        if not hasattr(self, "_instance_token"):
+            self._instance_token = ""
+        if not hasattr(self, "_screen_analysis_failure_count"):
+            self._screen_analysis_failure_count = 0
+        if not hasattr(self, "_screen_analysis_backoff_until"):
+            self._screen_analysis_backoff_until = 0.0
         if not hasattr(self, "window_companion_active_title"):
             self.window_companion_active_title = ""
         if not hasattr(self, "window_companion_active_target"):
@@ -1182,6 +1231,111 @@ class ScreenCompanion(Star):
             self._recording_audio_device = None
         if not hasattr(self, "_recording_ffmpeg_path"):
             self._recording_ffmpeg_path = None
+        if not hasattr(self, "_recording_video_encoder"):
+            self._recording_video_encoder = None
+        if not hasattr(self, "_recording_video_encoder_source"):
+            self._recording_video_encoder_source = ""
+
+    def _register_process_instance(self) -> None:
+        global _ACTIVE_INSTANCE_TOKEN
+        token = uuid.uuid4().hex
+        with _PROCESS_GUARD_LOCK:
+            _ACTIVE_INSTANCE_TOKEN = token
+        self._instance_token = token
+
+    def _is_current_process_instance(self) -> bool:
+        token = str(getattr(self, "_instance_token", "") or "").strip()
+        if not token:
+            return True
+        with _PROCESS_GUARD_LOCK:
+            return _ACTIVE_INSTANCE_TOKEN == token
+
+    def _cleanup_legacy_default_custom_tasks(self) -> None:
+        legacy_value = self.LEGACY_DEFAULT_CUSTOM_TASK.strip()
+        current_value = str(getattr(self, "custom_tasks", "") or "").strip()
+        if current_value != legacy_value:
+            return
+
+        logger.info("检测到旧版默认自定义监控任务，已自动清理")
+        self.custom_tasks = ""
+        try:
+            self.plugin_config.custom_tasks = ""
+        except Exception:
+            pass
+
+    def _try_enter_process_guard(
+        self,
+        guard_key: str,
+        *,
+        stale_seconds: float,
+    ) -> bool:
+        now_ts = time.time()
+        with _PROCESS_GUARD_LOCK:
+            expired_keys = [
+                key
+                for key, started_at in _PROCESS_GUARDS.items()
+                if (now_ts - float(started_at or 0.0)) >= stale_seconds
+            ]
+            for key in expired_keys:
+                _PROCESS_GUARDS.pop(key, None)
+            if guard_key in _PROCESS_GUARDS:
+                return False
+            _PROCESS_GUARDS[guard_key] = now_ts
+            return True
+
+    def _leave_process_guard(self, guard_key: str) -> None:
+        with _PROCESS_GUARD_LOCK:
+            _PROCESS_GUARDS.pop(guard_key, None)
+
+    def _try_mark_custom_task_dispatch(self, task_key: str) -> bool:
+        return self._try_enter_process_guard(
+            f"custom_task_dispatch:{task_key}",
+            stale_seconds=self.CUSTOM_TASK_PROCESS_DEDUP_SECONDS,
+        )
+
+    def _get_screen_analysis_backoff_remaining(self) -> float:
+        self._ensure_runtime_state()
+        backoff_until = float(getattr(self, "_screen_analysis_backoff_until", 0.0) or 0.0)
+        return max(0.0, backoff_until - time.time())
+
+    def _record_screen_analysis_result(self, ok: bool, *, error_type: str = "") -> None:
+        self._ensure_runtime_state()
+        if ok:
+            self._screen_analysis_failure_count = 0
+            self._screen_analysis_backoff_until = 0.0
+            return
+
+        normalized_error_type = str(error_type or "").strip().lower()
+        if normalized_error_type not in {"api", "timeout"}:
+            return
+
+        failure_count = int(getattr(self, "_screen_analysis_failure_count", 0) or 0) + 1
+        self._screen_analysis_failure_count = failure_count
+        backoff_seconds = min(
+            self.SCREEN_ANALYSIS_FAILURE_BACKOFF_MAX_SECONDS,
+            self.SCREEN_ANALYSIS_FAILURE_BACKOFF_BASE_SECONDS * (2 ** max(0, failure_count - 1)),
+        )
+        self._screen_analysis_backoff_until = time.time() + backoff_seconds
+        logger.warning(
+            f"识屏链路连续失败，进入退避 {backoff_seconds} 秒: error_type={normalized_error_type}, "
+            f"failure_count={failure_count}"
+        )
+
+    def _try_begin_background_screen_job(self) -> tuple[bool, str]:
+        remaining = self._get_screen_analysis_backoff_remaining()
+        if remaining > 0:
+            return False, f"识屏链路退避中，约 {max(1, int(remaining))} 秒后再试"
+
+        acquired = self._try_enter_process_guard(
+            "background_screen_job",
+            stale_seconds=self.BACKGROUND_SCREEN_GUARD_STALE_SECONDS,
+        )
+        if not acquired:
+            return False, "已有后台识屏任务正在执行"
+        return True, ""
+
+    def _finish_background_screen_job(self) -> None:
+        self._leave_process_guard("background_screen_job")
 
     def _get_recording_fps(self) -> float:
         return max(0.01, float(getattr(self, "recording_fps", self.RECORDING_FPS) or self.RECORDING_FPS))
@@ -1230,6 +1384,320 @@ class ScreenCompanion(Star):
         ffmpeg_path = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe") or ""
         self._recording_ffmpeg_path = ffmpeg_path or None
         return ffmpeg_path
+
+    def _get_recording_video_encoder(self) -> str:
+        self._ensure_recording_runtime_state()
+        ffmpeg_path = self._get_ffmpeg_path()
+        if not ffmpeg_path:
+            return "libx264"
+
+        cached_encoder = str(getattr(self, "_recording_video_encoder", "") or "").strip()
+        cached_source = str(getattr(self, "_recording_video_encoder_source", "") or "").strip()
+        if cached_encoder and cached_source == ffmpeg_path:
+            return cached_encoder
+
+        encoder = "mpeg4"
+        try:
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-encoders"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=12,
+                creationflags=creationflags,
+            )
+            output = "\n".join(
+                piece for piece in [result.stdout or "", result.stderr or ""] if piece
+            )
+            if "libx264" in output:
+                encoder = "libx264"
+        except Exception as e:
+            logger.debug(f"检测 ffmpeg 编码器失败，将使用兼容编码器: {e}")
+
+        self._recording_video_encoder = encoder
+        self._recording_video_encoder_source = ffmpeg_path
+        return encoder
+
+    def _build_recording_video_args(self) -> list[str]:
+        encoder = self._get_recording_video_encoder()
+        args = ["-c:v", encoder]
+        if encoder == "libx264":
+            args.extend(["-preset", "ultrafast", "-crf", "32"])
+        else:
+            args.extend(["-q:v", "7"])
+        args.extend(["-pix_fmt", "yuv420p"])
+        return args
+
+    @staticmethod
+    def _build_evenly_spaced_indices(total_count: int, sample_count: int) -> list[int]:
+        total = max(0, int(total_count or 0))
+        target = max(1, int(sample_count or 1))
+        if total <= 0:
+            return []
+        if total <= target:
+            return list(range(total))
+        if target == 1:
+            return [total // 2]
+
+        last_index = total - 1
+        indices = []
+        for position in range(target):
+            ratio = position / max(1, target - 1)
+            indices.append(int(round(last_index * ratio)))
+        return sorted(set(max(0, min(last_index, value)) for value in indices))
+
+    @staticmethod
+    def _build_sample_frame_labels(total_count: int, chosen_indices: list[int]) -> list[str]:
+        if not chosen_indices:
+            return []
+        if len(chosen_indices) == 1:
+            return ["中段"]
+        if len(chosen_indices) == 2:
+            return ["开头", "结尾"]
+        if len(chosen_indices) == 3:
+            return ["开头", "中段", "结尾"]
+
+        labels = []
+        last_index = max(1, int(total_count) - 1)
+        for index, frame_index in enumerate(chosen_indices):
+            if index == 0:
+                labels.append("开头")
+                continue
+            if index == len(chosen_indices) - 1:
+                labels.append("结尾")
+                continue
+            percent = int(round((frame_index / last_index) * 100))
+            labels.append(f"{percent}%")
+        return labels
+
+    def _get_video_sampling_plan(
+        self,
+        scene: str,
+        *,
+        duration_seconds: int,
+        use_external_vision: bool,
+    ) -> dict[str, Any]:
+        normalized_duration = max(1, int(duration_seconds or self._get_recording_duration_seconds()))
+        profile = self._get_scene_behavior_profile(scene)
+        category = str(profile.get("category", "general") or "general")
+
+        if normalized_duration <= 8:
+            sample_count = 3
+        elif normalized_duration <= 15:
+            sample_count = 4
+        elif normalized_duration <= 25:
+            sample_count = 5
+        else:
+            sample_count = 6
+
+        if category == "entertainment":
+            sample_count = min(6, sample_count + 1)
+        elif category == "work":
+            sample_count = max(3, sample_count - 1)
+
+        if use_external_vision:
+            sample_count = max(sample_count, 4)
+
+        if sample_count <= 3:
+            sampling_strategy = "keyframe_sheet"
+        elif category == "entertainment":
+            sampling_strategy = "timeline_sheet_dense"
+        elif category == "work":
+            sampling_strategy = "timeline_sheet_compact"
+        else:
+            sampling_strategy = "timeline_sheet"
+
+        return {
+            "sample_count": sample_count,
+            "sampling_strategy": sampling_strategy,
+            "duration_seconds": normalized_duration,
+            "scene_category": category,
+        }
+
+    def _extract_video_sample_sheet_sync(
+        self,
+        video_bytes: bytes,
+        *,
+        sample_count: int = 3,
+        sampling_strategy: str = "keyframe_sheet",
+    ) -> dict[str, Any] | None:
+        ffmpeg_path = self._get_ffmpeg_path()
+        if not ffmpeg_path or not video_bytes:
+            return None
+
+        from PIL import Image, ImageDraw, ImageFont
+
+        with tempfile.TemporaryDirectory(prefix="screen_companion_sample_") as temp_dir:
+            input_path = os.path.join(temp_dir, "input.mp4")
+            with open(input_path, "wb") as f:
+                f.write(video_bytes)
+
+            frame_pattern = os.path.join(temp_dir, "frame_%03d.jpg")
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(
+                [
+                    ffmpeg_path,
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    input_path,
+                    "-vf",
+                    "fps=1",
+                    frame_pattern,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=20,
+                creationflags=creationflags,
+            )
+            if result.returncode != 0:
+                return None
+
+            frame_paths = sorted(
+                os.path.join(temp_dir, filename)
+                for filename in os.listdir(temp_dir)
+                if filename.startswith("frame_") and filename.endswith(".jpg")
+            )
+            if not frame_paths:
+                return None
+
+            chosen_indices = self._build_evenly_spaced_indices(
+                len(frame_paths),
+                sample_count,
+            )
+            chosen_paths = [frame_paths[index] for index in chosen_indices]
+            frame_labels = self._build_sample_frame_labels(len(frame_paths), chosen_indices)
+            frames = []
+            for index, frame_path in enumerate(chosen_paths):
+                with Image.open(frame_path) as image:
+                    frame = image.convert("RGB")
+                    label = frame_labels[min(index, len(frame_labels) - 1)]
+                    frames.append((label, frame.copy()))
+
+            if not frames:
+                return None
+
+            target_width = min(960, max(frame.width for _, frame in frames))
+            padding = 18
+            gap = 12
+            label_height = 34
+            resized_frames = []
+            for label, frame in frames:
+                scale = target_width / max(1, frame.width)
+                target_height = max(1, int(frame.height * scale))
+                resized_frames.append(
+                    (
+                        label,
+                        frame.resize((target_width, target_height)),
+                    )
+                )
+
+            total_height = padding * 2 + sum(frame.height + label_height for _, frame in resized_frames) + gap * max(0, len(resized_frames) - 1)
+            canvas = Image.new("RGB", (target_width + padding * 2, total_height), "#111418")
+            draw = ImageDraw.Draw(canvas)
+            try:
+                font = ImageFont.truetype("msyh.ttc", 18)
+            except Exception:
+                font = ImageFont.load_default()
+
+            current_y = padding
+            for label, frame in resized_frames:
+                draw.rounded_rectangle(
+                    (padding, current_y, padding + target_width, current_y + label_height - 8),
+                    radius=10,
+                    fill="#1d232c",
+                )
+                draw.text(
+                    (padding + 12, current_y + 5),
+                    f"{label}关键帧",
+                    fill="#f4f7fb",
+                    font=font,
+                )
+                current_y += label_height
+                canvas.paste(frame, (padding, current_y))
+                current_y += frame.height + gap
+
+            buffer = io.BytesIO()
+            canvas.save(buffer, format="JPEG", quality=86)
+            return {
+                "media_kind": "image",
+                "mime_type": "image/jpeg",
+                "media_bytes": buffer.getvalue(),
+                "frame_count": len(resized_frames),
+                "frame_labels": [label for label, _ in resized_frames],
+                "sampling_strategy": sampling_strategy,
+            }
+
+    async def _build_video_sample_capture_context(
+        self,
+        capture_context: dict[str, Any],
+        *,
+        scene: str,
+        use_external_vision: bool,
+    ) -> dict[str, Any] | None:
+        media_bytes = capture_context.get("media_bytes", b"") or b""
+        duration_seconds = int(
+            capture_context.get("duration_seconds", 0) or self._get_recording_duration_seconds()
+        )
+        sampling_plan = self._get_video_sampling_plan(
+            scene,
+            duration_seconds=duration_seconds,
+            use_external_vision=use_external_vision,
+        )
+        sample_sheet = await asyncio.to_thread(
+            self._extract_video_sample_sheet_sync,
+            media_bytes,
+            sample_count=int(sampling_plan.get("sample_count", 3) or 3),
+            sampling_strategy=str(
+                sampling_plan.get("sampling_strategy", "keyframe_sheet") or "keyframe_sheet"
+            ),
+        )
+        if not sample_sheet:
+            return None
+
+        return {
+            "media_kind": "image",
+            "mime_type": sample_sheet["mime_type"],
+            "media_bytes": sample_sheet["media_bytes"],
+            "active_window_title": capture_context.get("active_window_title", ""),
+            "source_label": "录屏关键帧拼图",
+            "sampling_strategy": sample_sheet.get("sampling_strategy", "keyframe_sheet"),
+            "frame_count": sample_sheet.get("frame_count", 0),
+            "frame_labels": sample_sheet.get("frame_labels", []),
+            "duration_seconds": duration_seconds,
+            "original_media_kind": "video",
+        }
+
+    def _should_keep_sampled_video_only(
+        self,
+        scene: str,
+        *,
+        use_external_vision: bool,
+    ) -> bool:
+        profile = self._get_scene_behavior_profile(scene)
+        if use_external_vision:
+            return True
+        return bool(profile.get("prefer_sample_only", False))
+
+    def _looks_uncertain_screen_result(self, text: str) -> bool:
+        normalized = self._normalize_record_text(text)
+        if not normalized or self._is_low_value_record_text(normalized):
+            return True
+        uncertain_markers = (
+            "看不清",
+            "不确定",
+            "无法判断",
+            "信息不足",
+            "可能",
+            "似乎",
+        )
+        return any(marker in str(text or "") for marker in uncertain_markers)
 
     def _get_recording_cache_dir(self) -> str:
         cache_dir = os.path.join(str(self.plugin_config.data_dir), "cache")
@@ -1358,17 +1826,10 @@ class ScreenCompanion(Star):
             [
                 "-t",
                 str(duration),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-crf",
-                "32",
-                "-pix_fmt",
-                "yuv420p",
-                output_path,
             ]
         )
+        cmd.extend(self._build_recording_video_args())
+        cmd.append(output_path)
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         result = subprocess.run(
@@ -1439,17 +1900,10 @@ class ScreenCompanion(Star):
             [
                 "-t",
                 str(self._get_recording_duration_seconds()),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-crf",
-                "32",
-                "-pix_fmt",
-                "yuv420p",
-                output_path,
             ]
         )
+        cmd.extend(self._build_recording_video_args())
+        cmd.append(output_path)
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         process = subprocess.Popen(
@@ -1606,7 +2060,13 @@ class ScreenCompanion(Star):
         if new_unknown_count < unknown_count:
             logger.info(f"未知场景整理完成，从 {unknown_count} 条减少到 {new_unknown_count} 条")
 
-    def _add_observation(self, scene, recognition_text, active_window_title):
+    def _add_observation(
+        self,
+        scene,
+        recognition_text,
+        active_window_title,
+        extra: dict[str, Any] | None = None,
+    ):
         """添加一条观察记录。"""
         import datetime
         scene = self._normalize_scene_label(scene)
@@ -1623,6 +2083,11 @@ class ScreenCompanion(Star):
             "window_title": active_window_title,
             "description": recognition_text[:200],
         }
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if value in (None, "", [], {}):
+                    continue
+                observation[key] = value
         self.observations.append(observation)
         if len(self.observations) > self.max_observations:
             # 每次达到上限时删除6条，保留3天的记录（每天最多3条）
@@ -1746,10 +2211,120 @@ class ScreenCompanion(Star):
         self.long_term_memory.setdefault("memory_associations", {})
         self.long_term_memory.setdefault("memory_priorities", {})
         self.long_term_memory.setdefault("shared_activities", {})
+        self.long_term_memory.setdefault("episodic_memories", [])
+        self.long_term_memory.setdefault("focus_patterns", {})
+
+    def _extract_memory_focus(self, text: str, max_length: int = 48) -> str:
+        summary = self._compress_recognition_text(text, max_length=max_length)
+        summary = str(summary or "").strip().strip(" .。!！?？,，:：;；")
+        if not summary:
+            return ""
+        return summary[:max_length]
+
+    def _remember_episodic_memory(
+        self,
+        *,
+        scene: str,
+        active_window: str,
+        summary: str,
+        response_preview: str = "",
+        kind: str = "screen_observation",
+    ) -> bool:
+        normalized_summary = self._extract_memory_focus(summary, max_length=72)
+        if not normalized_summary or self._is_low_value_record_text(normalized_summary):
+            return False
+
+        self._ensure_long_term_memory_defaults()
+        scene = self._normalize_scene_label(scene)
+        active_window = self._normalize_window_title(active_window)
+        today = datetime.date.today().isoformat()
+        now_ts = datetime.datetime.now().isoformat()
+        memories = list(self.long_term_memory.get("episodic_memories", []) or [])
+
+        matched_index = None
+        for index, item in enumerate(memories):
+            if not isinstance(item, dict):
+                continue
+            previous_scene = self._normalize_scene_label(item.get("scene", ""))
+            previous_window = self._normalize_window_title(item.get("active_window", ""))
+            previous_summary = self._extract_memory_focus(item.get("summary", ""), max_length=72)
+            if scene and previous_scene and scene != previous_scene:
+                continue
+            if active_window and previous_window and active_window != previous_window:
+                continue
+            if self._is_similar_record(normalized_summary, previous_summary, threshold=0.82):
+                matched_index = index
+                break
+
+        if matched_index is None:
+            memories.append(
+                {
+                    "scene": scene,
+                    "active_window": active_window,
+                    "summary": normalized_summary,
+                    "response_preview": self._truncate_preview_text(response_preview, limit=120),
+                    "kind": str(kind or "screen_observation"),
+                    "count": 1,
+                    "first_seen": today,
+                    "last_seen": today,
+                    "updated_at": now_ts,
+                    "priority": 1,
+                }
+            )
+        else:
+            target = memories[matched_index]
+            target["count"] = int(target.get("count", 0) or 0) + 1
+            target["last_seen"] = today
+            target["updated_at"] = now_ts
+            if response_preview:
+                target["response_preview"] = self._truncate_preview_text(response_preview, limit=120)
+            if not target.get("summary"):
+                target["summary"] = normalized_summary
+
+        self.long_term_memory["episodic_memories"] = memories
+        return True
+
+    def _remember_focus_pattern(
+        self,
+        *,
+        scene: str,
+        active_window: str,
+        summary: str,
+    ) -> bool:
+        focus_text = self._extract_memory_focus(summary, max_length=40)
+        if not focus_text or self._is_low_value_record_text(focus_text):
+            return False
+
+        self._ensure_long_term_memory_defaults()
+        scene = self._normalize_scene_label(scene)
+        active_window = self._normalize_window_title(active_window)
+        if not scene and not active_window:
+            return False
+
+        pattern_key = f"{scene or 'general'}::{active_window or 'window'}::{focus_text}"
+        today = datetime.date.today().isoformat()
+        focus_patterns = self.long_term_memory.setdefault("focus_patterns", {})
+        item = focus_patterns.setdefault(
+            pattern_key,
+            {
+                "scene": scene,
+                "active_window": active_window,
+                "summary": focus_text,
+                "count": 0,
+                "last_seen": today,
+                "priority": 0,
+            },
+        )
+        item["count"] = int(item.get("count", 0) or 0) + 1
+        item["last_seen"] = today
+        return True
 
     def _is_low_value_record_text(self, text: str) -> bool:
         normalized = self._normalize_record_text(text)
         if len(normalized) < 12:
+            return True
+
+        if self._is_screen_error_text(normalized):
             return True
 
         low_value_patterns = (
@@ -1768,6 +2343,25 @@ class ScreenCompanion(Star):
             "不确定",
         )
         return any(pattern in normalized for pattern in low_value_patterns)
+
+    def _is_screen_error_text(self, text: str) -> bool:
+        normalized = self._normalize_record_text(text)
+        if not normalized:
+            return False
+
+        error_patterns = (
+            "[识屏异常",
+            "识屏异常",
+            "外部接口调用失败",
+            "视觉分析服务暂时不可用",
+            "当前模型暂时不支持这次多模态识别",
+            "这次视觉分析没有成功",
+            "vision api timeout",
+            "vision api",
+            "api调用失败",
+            "检查配置或稍后再试",
+        )
+        return any(pattern in normalized for pattern in error_patterns)
 
     def _is_similar_record(self, current_text: str, previous_text: str, threshold: float = 0.98) -> bool:
         import difflib
@@ -1833,6 +2427,8 @@ class ScreenCompanion(Star):
 
     def _should_store_diary_entry(self, content: str, active_window: str) -> tuple[bool, str]:
         normalized_window = self._normalize_window_title(active_window)
+        if self._is_screen_error_text(content):
+            return False, "screen_error"
         if self._is_low_value_record_text(content):
             return False, "low_value"
 
@@ -2192,10 +2788,12 @@ class ScreenCompanion(Star):
         weekday: str,
         observation_text: str,
         reflection_text: str,
+        structured_summary: dict[str, Any] | None = None,
         weather_info: str = "",
     ) -> str:
         observation_text = str(observation_text or "").strip()
         reflection_text = self._sanitize_diary_section_text(reflection_text)
+        structured_summary = structured_summary or {}
 
         parts = [
             f"# {self.bot_name} 的日记",
@@ -2205,6 +2803,10 @@ class ScreenCompanion(Star):
         ]
         if weather_info:
             parts.extend([f"**天气**: {weather_info}", ""])
+
+        summary_lines = self._build_diary_summary_markdown(structured_summary)
+        if summary_lines:
+            parts.extend(["## 今日概览", "", *summary_lines, ""])
 
         parts.extend(
             [
@@ -2218,6 +2820,269 @@ class ScreenCompanion(Star):
             ]
         )
         return "\n".join(parts).strip() + "\n"
+
+    def _extract_actionable_suggestions(
+        self,
+        reflection_text: str,
+        *,
+        limit: int = 3,
+    ) -> list[str]:
+        text = str(reflection_text or "").strip()
+        if not text:
+            return []
+
+        import re
+
+        raw_sentences = [
+            sentence.strip()
+            for sentence in re.split(r"[。\n！？!?\r]+", text)
+            if sentence.strip()
+        ]
+        prioritized = []
+        fallback = []
+        keywords = ("建议", "记得", "可以", "优先", "先", "下次", "别忘了", "不如")
+        for sentence in raw_sentences:
+            clean_sentence = sentence.lstrip("-• ").strip()
+            if not clean_sentence:
+                continue
+            if any(keyword in clean_sentence for keyword in keywords):
+                prioritized.append(clean_sentence)
+            else:
+                fallback.append(clean_sentence)
+
+        picked = prioritized[:limit]
+        if len(picked) < limit:
+            picked.extend(fallback[: max(0, limit - len(picked))])
+
+        deduped = []
+        seen = set()
+        for sentence in picked:
+            normalized = self._normalize_record_text(sentence)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(sentence[:80])
+        return deduped[:limit]
+
+    def _build_diary_structured_summary(
+        self,
+        compacted_entries: list[dict[str, Any]],
+        reflection_text: str,
+    ) -> dict[str, Any]:
+        summary = {
+            "main_windows": [],
+            "longest_task": {},
+            "repeated_focuses": [],
+            "suggestion_items": self._extract_actionable_suggestions(reflection_text, limit=3),
+            "entry_count": len(compacted_entries or []),
+        }
+        if not compacted_entries:
+            return summary
+
+        window_stats: dict[str, dict[str, Any]] = {}
+        repeated_focuses = []
+        longest_task = None
+        longest_span = -1
+
+        for entry in compacted_entries:
+            window_title = self._normalize_window_title(entry.get("active_window") or "") or "当前窗口"
+            start_minutes = self._parse_clock_to_minutes(entry.get("start_time"))
+            end_minutes = self._parse_clock_to_minutes(entry.get("end_time"))
+            duration_minutes = 0
+            if start_minutes is not None and end_minutes is not None and end_minutes >= start_minutes:
+                duration_minutes = end_minutes - start_minutes
+
+            stats = window_stats.setdefault(
+                window_title,
+                {"groups": 0, "duration_minutes": 0, "points": 0},
+            )
+            stats["groups"] += 1
+            stats["duration_minutes"] += max(1, duration_minutes)
+            stats["points"] += len(entry.get("points", []) or [])
+
+            if duration_minutes > longest_span:
+                longest_span = duration_minutes
+                longest_task = {
+                    "window_title": window_title,
+                    "time_range": (
+                        entry.get("start_time")
+                        if entry.get("start_time") == entry.get("end_time")
+                        else f"{entry.get('start_time')}-{entry.get('end_time')}"
+                    ),
+                    "focus": str((entry.get("points", []) or [""])[0] or "").strip()[:90],
+                    "duration_minutes": max(1, duration_minutes),
+                }
+
+            if stats["groups"] >= 2 or len(entry.get("points", []) or []) >= 2:
+                repeated_focuses.append(
+                    {
+                        "window_title": window_title,
+                        "note": str((entry.get("points", []) or [""])[0] or "").strip()[:90],
+                    }
+                )
+
+        ranked_windows = sorted(
+            window_stats.items(),
+            key=lambda item: (
+                int((item[1] or {}).get("duration_minutes", 0) or 0),
+                int((item[1] or {}).get("points", 0) or 0),
+                int((item[1] or {}).get("groups", 0) or 0),
+            ),
+            reverse=True,
+        )[:4]
+        summary["main_windows"] = [
+            {
+                "window_title": window_title,
+                "duration_minutes": data.get("duration_minutes", 0),
+                "groups": data.get("groups", 0),
+                "points": data.get("points", 0),
+            }
+            for window_title, data in ranked_windows
+        ]
+        summary["longest_task"] = longest_task or {}
+
+        deduped_focuses = []
+        seen_focuses = set()
+        for item in repeated_focuses:
+            key = self._normalize_record_text(
+                f"{item.get('window_title', '')} {item.get('note', '')}"
+            )
+            if not key or key in seen_focuses:
+                continue
+            seen_focuses.add(key)
+            deduped_focuses.append(item)
+            if len(deduped_focuses) >= 3:
+                break
+        summary["repeated_focuses"] = deduped_focuses
+        return summary
+
+    def _build_diary_summary_markdown(self, structured_summary: dict[str, Any]) -> list[str]:
+        if not isinstance(structured_summary, dict):
+            return []
+
+        lines = []
+        main_windows = structured_summary.get("main_windows", []) or []
+        if main_windows:
+            main_window_text = "、".join(
+                f"{item.get('window_title', '当前窗口')}（约 {int(item.get('duration_minutes', 0) or 0)} 分钟）"
+                for item in main_windows[:3]
+            )
+            lines.append(f"- 今日主要窗口：{main_window_text}")
+
+        longest_task = structured_summary.get("longest_task", {}) or {}
+        if longest_task.get("window_title"):
+            longest_focus = str(longest_task.get("focus", "") or "").strip()
+            longest_line = (
+                f"- 最长停留任务：{longest_task.get('window_title')}，大约 {int(longest_task.get('duration_minutes', 0) or 0)} 分钟"
+            )
+            if longest_focus:
+                longest_line += f"，当时主要在：{longest_focus}"
+            lines.append(longest_line)
+
+        repeated_focuses = structured_summary.get("repeated_focuses", []) or []
+        if repeated_focuses:
+            repeated_text = "；".join(
+                f"{item.get('window_title', '当前窗口')}：{item.get('note', '')}"
+                for item in repeated_focuses[:2]
+            )
+            lines.append(f"- 重复卡点：{repeated_text}")
+
+        suggestion_items = structured_summary.get("suggestion_items", []) or []
+        if suggestion_items:
+            lines.append("- 建议事项：")
+            for item in suggestion_items[:3]:
+                lines.append(f"  - {item}")
+
+        return lines
+
+    def _get_diary_summary_path(self, target_date: datetime.date) -> str:
+        return os.path.join(
+            self.diary_storage,
+            f"diary_{target_date.strftime('%Y%m%d')}.summary.json",
+        )
+
+    def _load_diary_structured_summary(self, target_date: datetime.date) -> dict[str, Any]:
+        summary_path = self._get_diary_summary_path(target_date)
+        if not os.path.exists(summary_path):
+            return {}
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception as e:
+            logger.debug(f"读取日记结构化摘要失败: {e}")
+            return {}
+
+    def _save_diary_structured_summary(
+        self,
+        target_date: datetime.date,
+        structured_summary: dict[str, Any],
+    ) -> None:
+        summary_path = self._get_diary_summary_path(target_date)
+        try:
+            with open(summary_path, "w", encoding="utf-8") as f:
+                json.dump(structured_summary, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存日记结构化摘要失败: {e}")
+
+    def _remember_diary_summary_memories(
+        self,
+        target_date: datetime.date,
+        structured_summary: dict[str, Any],
+    ) -> None:
+        if not isinstance(structured_summary, dict):
+            return
+
+        diary_date = target_date.isoformat()
+        main_windows = structured_summary.get("main_windows", []) or []
+        for item in main_windows[:3]:
+            window_title = self._normalize_window_title(item.get("window_title", ""))
+            if not window_title:
+                continue
+            duration_minutes = int(item.get("duration_minutes", 0) or 0)
+            focus_text = self._extract_memory_focus(item.get("focus", ""), max_length=56)
+            summary = f"{diary_date} 主要停留在《{window_title}》约 {duration_minutes} 分钟"
+            if focus_text:
+                summary += f"，当时在处理：{focus_text}"
+            self._remember_episodic_memory(
+                scene="",
+                active_window=window_title,
+                summary=summary,
+                kind="diary_summary",
+            )
+            if focus_text:
+                self._remember_focus_pattern(
+                    scene="",
+                    active_window=window_title,
+                    summary=focus_text,
+                )
+
+        longest_task = structured_summary.get("longest_task", {}) or {}
+        if isinstance(longest_task, dict) and longest_task.get("window_title"):
+            longest_summary = (
+                f"{diary_date} 最长停留任务是《{longest_task.get('window_title')}》"
+            )
+            focus_text = self._extract_memory_focus(longest_task.get("focus", ""), max_length=56)
+            if focus_text:
+                longest_summary += f"，主要在：{focus_text}"
+            self._remember_episodic_memory(
+                scene="",
+                active_window=str(longest_task.get("window_title", "") or ""),
+                summary=longest_summary,
+                kind="diary_summary",
+            )
+
+        repeated_focuses = structured_summary.get("repeated_focuses", []) or []
+        for item in repeated_focuses[:3]:
+            note_text = self._extract_memory_focus(item.get("note", ""), max_length=48)
+            window_title = self._normalize_window_title(item.get("window_title", ""))
+            if not note_text:
+                continue
+            self._remember_focus_pattern(
+                scene="",
+                active_window=window_title,
+                summary=note_text,
+            )
 
     def _clean_long_term_memory_noise(self):
         """Remove low-value labels from long-term memory."""
@@ -2261,7 +3126,10 @@ class ScreenCompanion(Star):
             for scene_name, data in scenes.items():
                 normalized_scene = self._normalize_scene_label(scene_name)
                 if normalized_scene:
-                    cleaned_scenes[normalized_scene] = data
+                    scene_data = dict(data or {})
+                    if "usage_count" not in scene_data and "count" in scene_data:
+                        scene_data["usage_count"] = int(scene_data.get("count", 0) or 0)
+                    cleaned_scenes[normalized_scene] = scene_data
             memory["scenes"] = self._limit_ranked_dict_items(
                 cleaned_scenes,
                 limit=40,
@@ -2318,6 +3186,79 @@ class ScreenCompanion(Star):
                 limit=60,
                 score_keys=("priority", "count"),
             )
+
+        episodic_memories = memory.get("episodic_memories", [])
+        if isinstance(episodic_memories, list):
+            cleaned_episodes = []
+            seen_episode_keys = set()
+            for item in episodic_memories:
+                if not isinstance(item, dict):
+                    continue
+                summary = self._extract_memory_focus(item.get("summary", ""), max_length=72)
+                if not summary:
+                    continue
+                scene = self._normalize_scene_label(item.get("scene", ""))
+                active_window = self._normalize_window_title(item.get("active_window", ""))
+                dedupe_key = (
+                    scene.casefold(),
+                    active_window.casefold(),
+                    self._normalize_record_text(summary),
+                )
+                if dedupe_key in seen_episode_keys:
+                    continue
+                seen_episode_keys.add(dedupe_key)
+                cleaned_episodes.append(
+                    {
+                        "scene": scene,
+                        "active_window": active_window,
+                        "summary": summary,
+                        "response_preview": self._truncate_preview_text(
+                            item.get("response_preview", ""),
+                            limit=120,
+                        ),
+                        "kind": str(item.get("kind", "screen_observation") or "screen_observation"),
+                        "count": int(item.get("count", 0) or 0),
+                        "first_seen": str(item.get("first_seen", "") or ""),
+                        "last_seen": str(item.get("last_seen", "") or ""),
+                        "updated_at": str(item.get("updated_at", "") or ""),
+                        "priority": int(item.get("priority", 0) or 0),
+                    }
+                )
+            cleaned_episodes.sort(
+                key=lambda item: (
+                    int(item.get("priority", 0) or 0),
+                    int(item.get("count", 0) or 0),
+                    str(item.get("last_seen", "") or ""),
+                ),
+                reverse=True,
+            )
+            memory["episodic_memories"] = cleaned_episodes[: self.EPISODIC_MEMORY_LIMIT]
+
+        focus_patterns = memory.get("focus_patterns", {})
+        if isinstance(focus_patterns, dict):
+            cleaned_focus_patterns = {}
+            for pattern_key, data in focus_patterns.items():
+                if not isinstance(data, dict):
+                    continue
+                summary = self._extract_memory_focus(data.get("summary", ""), max_length=48)
+                scene = self._normalize_scene_label(data.get("scene", ""))
+                active_window = self._normalize_window_title(data.get("active_window", ""))
+                if not summary:
+                    continue
+                normalized_key = f"{scene or 'general'}::{active_window or 'window'}::{summary}"
+                cleaned_focus_patterns[normalized_key] = {
+                    "scene": scene,
+                    "active_window": active_window,
+                    "summary": summary,
+                    "count": int(data.get("count", 0) or 0),
+                    "last_seen": str(data.get("last_seen", "") or ""),
+                    "priority": int(data.get("priority", 0) or 0),
+                }
+            memory["focus_patterns"] = self._limit_ranked_dict_items(
+                cleaned_focus_patterns,
+                limit=self.FOCUS_PATTERN_LIMIT,
+                score_keys=("priority", "count"),
+            )
         
         # 恢复 self_image 记忆
         if self_image_memory:
@@ -2325,7 +3266,15 @@ class ScreenCompanion(Star):
         else:
             memory.pop("self_image", None)
 
-    def _update_long_term_memory(self, scene, active_window, duration, user_preferences=None):
+    def _update_long_term_memory(
+        self,
+        scene,
+        active_window,
+        duration,
+        user_preferences=None,
+        memory_summary: str = "",
+        response_preview: str = "",
+    ):
         """更新长期记忆。"""
         import datetime
         today = datetime.date.today().isoformat()
@@ -2391,6 +3340,19 @@ class ScreenCompanion(Star):
         # 建立记忆关联
         if scene and app_name and not continuing_context:
             self._build_memory_associations(scene, app_name)
+
+        if memory_summary:
+            self._remember_episodic_memory(
+                scene=scene,
+                active_window=active_window,
+                summary=memory_summary,
+                response_preview=response_preview,
+            )
+            self._remember_focus_pattern(
+                scene=scene,
+                active_window=active_window,
+                summary=memory_summary,
+            )
         
         self._update_memory_priorities()
         
@@ -2401,52 +3363,66 @@ class ScreenCompanion(Star):
         self._save_long_term_memory()
 
     def _apply_memory_decay(self):
-        """对长期记忆应用时间衰减。"""
+        """对长期记忆做温和清理，避免短期未使用就被抹掉。"""
         import datetime
         today = datetime.date.today()
-        
+
         if "applications" in self.long_term_memory:
             for app_name, app_data in list(self.long_term_memory["applications"].items()):
-                last_used_date = datetime.date.fromisoformat(app_data["last_used"])
+                last_used_text = str(app_data.get("last_used", "") or "").strip()
+                if not last_used_text:
+                    continue
+                try:
+                    last_used_date = datetime.date.fromisoformat(last_used_text)
+                except ValueError:
+                    continue
+
                 days_since_used = (today - last_used_date).days
-                
-                # 随时间推移，使用频率和持续时长逐渐降低
-                if days_since_used > 0:
-                    decay_factor = 0.95 ** days_since_used
-                    app_data["usage_count"] = int(app_data["usage_count"] * decay_factor)
-                    app_data["total_duration"] = int(app_data["total_duration"] * decay_factor)
-                    app_data["priority"] = int(app_data["priority"] * decay_factor)
-                    
-                    if app_data["usage_count"] < 1:
-                        del self.long_term_memory["applications"][app_name]
-        
+                usage_count = int(app_data.get("usage_count", 0) or 0)
+                total_duration = int(app_data.get("total_duration", 0) or 0)
+                if (
+                    days_since_used > self.LONG_TERM_MEMORY_RETENTION_DAYS
+                    and usage_count <= 1
+                    and total_duration <= 5
+                ):
+                    del self.long_term_memory["applications"][app_name]
+
         if "scenes" in self.long_term_memory:
             for scene_name, scene_data in list(self.long_term_memory["scenes"].items()):
-                last_used_date = datetime.date.fromisoformat(scene_data["last_used"])
+                last_used_text = str(scene_data.get("last_used", "") or "").strip()
+                if not last_used_text:
+                    continue
+                try:
+                    last_used_date = datetime.date.fromisoformat(last_used_text)
+                except ValueError:
+                    continue
+
                 days_since_used = (today - last_used_date).days
-                
-                if days_since_used > 0:
-                    decay_factor = 0.95 ** days_since_used
-                    scene_data["usage_count"] = int(scene_data["usage_count"] * decay_factor)
-                    scene_data["priority"] = int(scene_data["priority"] * decay_factor)
-                    
-                    if scene_data["usage_count"] < 1:
-                        del self.long_term_memory["scenes"][scene_name]
-        
+                usage_count = int(scene_data.get("usage_count", 0) or 0)
+                if (
+                    days_since_used > self.LONG_TERM_MEMORY_RETENTION_DAYS
+                    and usage_count <= 1
+                ):
+                    del self.long_term_memory["scenes"][scene_name]
+
         if "user_preferences" in self.long_term_memory:
             for category, preferences in list(self.long_term_memory["user_preferences"].items()):
                 for pref, data in list(preferences.items()):
-                    last_mentioned_date = datetime.date.fromisoformat(data["last_mentioned"])
+                    last_mentioned_text = str(data.get("last_mentioned", "") or "").strip()
+                    if not last_mentioned_text:
+                        continue
+                    try:
+                        last_mentioned_date = datetime.date.fromisoformat(last_mentioned_text)
+                    except ValueError:
+                        continue
                     days_since_mentioned = (today - last_mentioned_date).days
-                    
-                    if days_since_mentioned > 0:
-                        decay_factor = 0.95 ** days_since_mentioned
-                        data["count"] = int(data["count"] * decay_factor)
-                        data["priority"] = int(data["priority"] * decay_factor)
-                        
-                        if data["count"] < 1:
-                            del preferences[pref]
-                
+
+                    if (
+                        days_since_mentioned > self.LIGHT_MEMORY_RETENTION_DAYS
+                        and int(data.get("count", 0) or 0) <= 1
+                    ):
+                        del preferences[pref]
+
                 if not preferences:
                     del self.long_term_memory["user_preferences"][category]
 
@@ -2461,13 +3437,64 @@ class ScreenCompanion(Star):
                     continue
 
                 days_since_shared = (today - last_shared_date).days
-                if days_since_shared > 0:
-                    decay_factor = 0.97 ** days_since_shared
-                    activity_data["count"] = int(activity_data.get("count", 0) * decay_factor)
-                    activity_data["priority"] = int(activity_data.get("priority", 0) * decay_factor)
+                if (
+                    days_since_shared > self.LIGHT_MEMORY_RETENTION_DAYS
+                    and int(activity_data.get("count", 0) or 0) <= 1
+                ):
+                    del self.long_term_memory["shared_activities"][activity_name]
 
-                    if activity_data["count"] < 1:
-                        del self.long_term_memory["shared_activities"][activity_name]
+        episodic_memories = self.long_term_memory.get("episodic_memories", [])
+        if isinstance(episodic_memories, list):
+            retained_episodes = []
+            for item in episodic_memories:
+                if not isinstance(item, dict):
+                    continue
+                last_seen_text = str(item.get("last_seen", "") or "").strip()
+                if not last_seen_text:
+                    retained_episodes.append(item)
+                    continue
+                try:
+                    last_seen_date = datetime.date.fromisoformat(last_seen_text)
+                except ValueError:
+                    retained_episodes.append(item)
+                    continue
+                days_since_seen = (today - last_seen_date).days
+                if (
+                    days_since_seen > self.LIGHT_MEMORY_RETENTION_DAYS
+                    and int(item.get("count", 0) or 0) <= 1
+                ):
+                    continue
+                retained_episodes.append(item)
+            self.long_term_memory["episodic_memories"] = retained_episodes
+
+        focus_patterns = self.long_term_memory.get("focus_patterns", {})
+        if isinstance(focus_patterns, dict):
+            for pattern_key, item in list(focus_patterns.items()):
+                if not isinstance(item, dict):
+                    del focus_patterns[pattern_key]
+                    continue
+                last_seen_text = str(item.get("last_seen", "") or "").strip()
+                if not last_seen_text:
+                    continue
+                try:
+                    last_seen_date = datetime.date.fromisoformat(last_seen_text)
+                except ValueError:
+                    continue
+                days_since_seen = (today - last_seen_date).days
+                if (
+                    days_since_seen > self.LIGHT_MEMORY_RETENTION_DAYS
+                    and int(item.get("count", 0) or 0) <= 1
+                ):
+                    del focus_patterns[pattern_key]
+
+    @staticmethod
+    def _build_memory_priority_value(base_count: int | float, days_since: int) -> int:
+        count = float(base_count or 0)
+        days = max(0, int(days_since or 0))
+        if count <= 0:
+            return 0
+        score = count * (1 / (1 + days))
+        return max(1, int(round(score)))
 
     def _build_memory_associations(self, scene, app_name):
         """建立场景与应用之间的记忆关联。"""
@@ -2520,27 +3547,32 @@ class ScreenCompanion(Star):
                 # 基于使用频率和最近使用时间计算优先级
                 last_used_date = datetime.date.fromisoformat(app_data["last_used"])
                 days_since_used = (today - last_used_date).days
-                
-                # 优先级 = 使用频率 * (1 / (1 + 距今天数))
-                priority = app_data["usage_count"] * (1 / (1 + days_since_used))
-                app_data["priority"] = int(priority)
+
+                app_data["priority"] = self._build_memory_priority_value(
+                    app_data.get("usage_count", 0),
+                    days_since_used,
+                )
         
         if "scenes" in self.long_term_memory:
             for scene_name, scene_data in self.long_term_memory["scenes"].items():
                 last_used_date = datetime.date.fromisoformat(scene_data["last_used"])
                 days_since_used = (today - last_used_date).days
-                
-                priority = scene_data["usage_count"] * (1 / (1 + days_since_used))
-                scene_data["priority"] = int(priority)
+
+                scene_data["priority"] = self._build_memory_priority_value(
+                    scene_data.get("usage_count", 0),
+                    days_since_used,
+                )
         
         if "user_preferences" in self.long_term_memory:
             for category, preferences in self.long_term_memory["user_preferences"].items():
                 for pref, data in preferences.items():
                     last_mentioned_date = datetime.date.fromisoformat(data["last_mentioned"])
                     days_since_mentioned = (today - last_mentioned_date).days
-                    
-                    priority = data["count"] * (1 / (1 + days_since_mentioned))
-                    data["priority"] = int(priority)
+
+                    data["priority"] = self._build_memory_priority_value(
+                        data.get("count", 0),
+                        days_since_mentioned,
+                    )
 
         if "shared_activities" in self.long_term_memory:
             for activity_name, data in self.long_term_memory["shared_activities"].items():
@@ -2555,44 +3587,200 @@ class ScreenCompanion(Star):
                     continue
 
                 days_since_shared = (today - last_shared_date).days
-                priority = data.get("count", 0) * (1 / (1 + days_since_shared))
-                data["priority"] = int(priority)
+                data["priority"] = self._build_memory_priority_value(
+                    data.get("count", 0),
+                    days_since_shared,
+                )
+
+        episodic_memories = self.long_term_memory.get("episodic_memories", [])
+        if isinstance(episodic_memories, list):
+            for item in episodic_memories:
+                if not isinstance(item, dict):
+                    continue
+                last_seen_text = str(item.get("last_seen", "") or "").strip()
+                if not last_seen_text:
+                    item["priority"] = int(item.get("count", 0) or 0)
+                    continue
+                try:
+                    last_seen_date = datetime.date.fromisoformat(last_seen_text)
+                except ValueError:
+                    item["priority"] = int(item.get("count", 0) or 0)
+                    continue
+                item["priority"] = self._build_memory_priority_value(
+                    item.get("count", 0),
+                    (today - last_seen_date).days,
+                )
+
+        focus_patterns = self.long_term_memory.get("focus_patterns", {})
+        if isinstance(focus_patterns, dict):
+            for _, item in focus_patterns.items():
+                if not isinstance(item, dict):
+                    continue
+                last_seen_text = str(item.get("last_seen", "") or "").strip()
+                if not last_seen_text:
+                    item["priority"] = int(item.get("count", 0) or 0)
+                    continue
+                try:
+                    last_seen_date = datetime.date.fromisoformat(last_seen_text)
+                except ValueError:
+                    item["priority"] = int(item.get("count", 0) or 0)
+                    continue
+                item["priority"] = self._build_memory_priority_value(
+                    item.get("count", 0),
+                    (today - last_seen_date).days,
+                )
 
     def _trigger_related_memories(self, scene, app_name):
         """触发与当前场景相关的记忆。"""
-        related_memories = []
-        
-        # 基于场景触发记忆
-        if "scenes" in self.long_term_memory and scene in self.long_term_memory["scenes"]:
-            scene_data = self.long_term_memory["scenes"][scene]
-            if scene_data["priority"] > 0:
-                related_memories.append(f"场景: {scene} (优先级 {scene_data['priority']})")
-        
-        # 基于应用触发记忆
-        if "applications" in self.long_term_memory and app_name in self.long_term_memory["applications"]:
-            app_data = self.long_term_memory["applications"][app_name]
-            if app_data["priority"] > 0:
-                related_memories.append(f"应用: {app_name} (优先级 {app_data['priority']})")
-        
-        # 基于关联关系触发记忆
-        association_key = f"{scene}_{app_name}"
-        if "memory_associations" in self.long_term_memory and association_key in self.long_term_memory["memory_associations"]:
-            association_data = self.long_term_memory["memory_associations"][association_key]
-            if association_data["count"] > 1:
-                related_memories.append(f"关联: {scene} 和 {app_name} (出现次数: {association_data['count']})")
-        
-        # 基于用户偏好触发记忆
-        if "user_preferences" in self.long_term_memory:
-            for category, preferences in self.long_term_memory["user_preferences"].items():
-                # 按优先级排序
-                sorted_prefs = sorted(preferences.items(), key=lambda x: x[1]["priority"], reverse=True)
-                # 取前 3 个高优先级偏好
-                top_prefs = sorted_prefs[:3]
-                for pref, data in top_prefs:
-                    if data["priority"] > 0:
-                        related_memories.append(f"偏好: {category} - {pref} (优先级 {data['priority']})")
+        self._ensure_long_term_memory_defaults()
+        normalized_scene = self._normalize_scene_label(scene)
+        normalized_app = self._normalize_window_title(app_name)
+        memory_candidates: list[tuple[float, str]] = []
 
-        return related_memories
+        episodic_memories = self.long_term_memory.get("episodic_memories", []) or []
+        for item in episodic_memories:
+            if not isinstance(item, dict):
+                continue
+            item_scene = self._normalize_scene_label(item.get("scene", ""))
+            item_window = self._normalize_window_title(item.get("active_window", ""))
+            if normalized_scene and item_scene and normalized_scene != item_scene:
+                continue
+            if normalized_app and item_window and normalized_app != item_window:
+                continue
+            summary = self._extract_memory_focus(item.get("summary", ""), max_length=72)
+            if not summary:
+                continue
+            count = int(item.get("count", 0) or 0)
+            priority = int(item.get("priority", 0) or 0)
+            if count <= 0 and priority <= 0:
+                continue
+            score = priority * 4 + count * 2
+            if normalized_app and item_window and normalized_app == item_window:
+                score += 3
+            if normalized_scene and item_scene and normalized_scene == item_scene:
+                score += 2
+            memory_candidates.append(
+                (
+                    score,
+                    f"你前几次在《{item_window or normalized_app or '这个窗口'}》里也在处理：{summary}。",
+                )
+            )
+
+        focus_patterns = self.long_term_memory.get("focus_patterns", {}) or {}
+        for _, item in focus_patterns.items():
+            if not isinstance(item, dict):
+                continue
+            item_scene = self._normalize_scene_label(item.get("scene", ""))
+            item_window = self._normalize_window_title(item.get("active_window", ""))
+            if normalized_scene and item_scene and normalized_scene != item_scene:
+                continue
+            if normalized_app and item_window and normalized_app != item_window:
+                continue
+            summary = self._extract_memory_focus(item.get("summary", ""), max_length=48)
+            if not summary:
+                continue
+            count = int(item.get("count", 0) or 0)
+            priority = int(item.get("priority", 0) or 0)
+            if count < 2 and priority <= 1:
+                continue
+            score = priority * 3 + count
+            memory_candidates.append(
+                (
+                    score,
+                    f"这个场景里你反复会关注：{summary}。",
+                )
+            )
+
+        scene_memory = self.long_term_memory.get("scenes", {}).get(normalized_scene, {})
+        if normalized_scene and isinstance(scene_memory, dict):
+            usage_count = int(scene_memory.get("usage_count", 0) or 0)
+            priority = int(scene_memory.get("priority", 0) or 0)
+            if usage_count > 0 or priority > 0:
+                score = priority * 2 + usage_count
+                memory_candidates.append(
+                    (
+                        score,
+                        f"你最近经常处在「{normalized_scene}」场景，适合沿着当前任务继续往前推。",
+                    )
+                )
+
+        app_memory = self.long_term_memory.get("applications", {}).get(normalized_app, {})
+        if normalized_app and isinstance(app_memory, dict):
+            usage_count = int(app_memory.get("usage_count", 0) or 0)
+            total_duration = int(app_memory.get("total_duration", 0) or 0)
+            top_scenes = sorted(
+                (app_memory.get("scenes", {}) or {}).items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:2]
+            top_scene_text = "、".join(name for name, _ in top_scenes if name)
+            if usage_count > 0 or total_duration > 0:
+                score = int(app_memory.get("priority", 0) or 0) * 3 + usage_count + total_duration / 60
+                summary = f"你之前经常在《{normalized_app}》里处理{top_scene_text or '当前这类'}任务。"
+                memory_candidates.append((score, summary))
+
+        association_key = f"{normalized_scene}_{normalized_app}"
+        association_data = self.long_term_memory.get("memory_associations", {}).get(
+            association_key,
+            {},
+        )
+        if normalized_scene and normalized_app and isinstance(association_data, dict):
+            association_count = int(association_data.get("count", 0) or 0)
+            if association_count > 1:
+                memory_candidates.append(
+                    (
+                        association_count * 4,
+                        f"「{normalized_scene} + {normalized_app}」这个组合你最近反复出现，可能就是今天的主要任务线。",
+                    )
+                )
+
+        profile = self._get_scene_behavior_profile(normalized_scene)
+        preference_categories = ["hobbies", "other"]
+        if profile["category"] == "entertainment":
+            preference_categories = ["music", "movies", "hobbies", "other"]
+        elif profile["category"] == "work":
+            preference_categories = ["other", "hobbies"]
+
+        user_preferences = self.long_term_memory.get("user_preferences", {}) or {}
+        for category in preference_categories:
+            preferences = user_preferences.get(category, {}) or {}
+            ranked_preferences = sorted(
+                preferences.items(),
+                key=lambda item: (
+                    int((item[1] or {}).get("priority", 0) or 0),
+                    int((item[1] or {}).get("count", 0) or 0),
+                ),
+                reverse=True,
+            )[:2]
+            for pref_name, pref_data in ranked_preferences:
+                priority = int((pref_data or {}).get("priority", 0) or 0)
+                if priority <= 0:
+                    continue
+                label = {
+                    "music": "偏爱的音乐",
+                    "movies": "喜欢的内容",
+                    "hobbies": "平时爱做的事",
+                    "other": "你在意的点",
+                }.get(category, "偏好")
+                memory_candidates.append(
+                    (
+                        priority,
+                        f"可以顺手呼应用户{label}：{pref_name}。",
+                    )
+                )
+
+        deduped = []
+        seen = set()
+        for _, summary in sorted(memory_candidates, key=lambda item: item[0], reverse=True):
+            normalized_summary = self._normalize_record_text(summary)
+            if not normalized_summary or normalized_summary in seen:
+                continue
+            seen.add(normalized_summary)
+            deduped.append(summary)
+            if len(deduped) >= 4:
+                break
+
+        return deduped
 
     def _add_user_preference(self, category, preference):
         """添加一条用户偏好。"""
@@ -2848,50 +4036,131 @@ class ScreenCompanion(Star):
         """更新活动状态，记录工作/摸鱼时间。"""
         import time
         current_time = time.time()
-        
+
         # 定义工作和摸鱼场景
         work_scenes = ["编程", "设计", "办公", "邮件", "浏览-工作"]
         play_scenes = ["游戏", "视频", "音乐", "社交", "浏览-娱乐"]
-        
+
         # 确定当前活动类型
         activity_type = "其他"
         if scene in work_scenes:
             activity_type = "工作"
         elif scene in play_scenes:
             activity_type = "摸鱼"
-        
+
         # 创建活动标识
         activity = f"{activity_type}:{scene}:{active_window[:50]}"
-        
+
         # 如果活动发生变化，记录上一个活动的时间
         if self.current_activity != activity:
             if self.current_activity and self.activity_start_time:
-                # 计算上一个活动的持续时间
-                duration = current_time - self.activity_start_time
-                if duration >= 60:  # 只记录超过1分钟的活动
-                    # 解析上一个活动的类型
-                    last_activity_parts = self.current_activity.split(":", 1)
-                    last_activity_type = last_activity_parts[0] if last_activity_parts else "其他"
-                    
-                    # 记录活动历史
-                    self.activity_history.append({
-                        "type": last_activity_type,
-                        "scene": self.current_activity.split(":")[1] if len(self.current_activity.split(":")) > 1 else "",
-                        "window": self.current_activity.split(":")[2] if len(self.current_activity.split(":")) > 2 else "",
-                        "start_time": self.activity_start_time,
-                        "end_time": current_time,
-                        "duration": duration
-                    })
-                    
-                    # 限制活动历史记录数量
-                    if len(self.activity_history) > 1000:
-                        self.activity_history = self.activity_history[-1000:]
-            
+                self._append_activity_record(
+                    activity=self.current_activity,
+                    start_time=self.activity_start_time,
+                    end_time=current_time,
+                )
+
             # 更新当前活动
             self.current_activity = activity
             self.activity_start_time = current_time
-        
+
         return activity_type
+
+    def _load_activity_history(self) -> None:
+        try:
+            activity_history_file = getattr(self, "activity_history_file", "")
+            if not activity_history_file:
+                activity_history_file = os.path.join(self.learning_storage, "activity_history.json")
+                self.activity_history_file = activity_history_file
+            if not os.path.exists(activity_history_file):
+                self.activity_history = []
+                return
+            with open(activity_history_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.activity_history = data if isinstance(data, list) else []
+        except Exception as e:
+            logger.error(f"加载活动历史失败: {e}")
+            self.activity_history = []
+
+    def _save_activity_history(self) -> None:
+        try:
+            activity_history_file = getattr(self, "activity_history_file", "")
+            if not activity_history_file:
+                activity_history_file = os.path.join(self.learning_storage, "activity_history.json")
+                self.activity_history_file = activity_history_file
+            with open(activity_history_file, "w", encoding="utf-8") as f:
+                json.dump(self.activity_history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存活动历史失败: {e}")
+
+    def _parse_activity_marker(self, activity: str) -> tuple[str, str, str]:
+        parts = str(activity or "").split(":", 2)
+        activity_type = parts[0] if len(parts) > 0 else "其他"
+        scene = parts[1] if len(parts) > 1 else ""
+        window = parts[2] if len(parts) > 2 else ""
+        return activity_type, scene, window
+
+    def _append_activity_record(
+        self,
+        *,
+        activity: str,
+        start_time: float,
+        end_time: float,
+        min_duration_seconds: int | None = None,
+    ) -> bool:
+        min_duration = (
+            self.ACTIVITY_MIN_DURATION_SECONDS
+            if min_duration_seconds is None
+            else max(0, int(min_duration_seconds or 0))
+        )
+        duration = float(end_time or 0) - float(start_time or 0)
+        if not activity or duration < min_duration:
+            return False
+
+        activity_type, scene, window = self._parse_activity_marker(activity)
+        self.activity_history.append(
+            {
+                "type": activity_type,
+                "scene": scene,
+                "window": window,
+                "start_time": float(start_time or 0),
+                "end_time": float(end_time or 0),
+                "duration": float(duration),
+            }
+        )
+        if len(self.activity_history) > self.ACTIVITY_HISTORY_LIMIT:
+            self.activity_history = self.activity_history[-self.ACTIVITY_HISTORY_LIMIT :]
+        self._save_activity_history()
+        return True
+
+    def _build_current_activity_snapshot(self, now_ts: float | None = None) -> dict[str, Any] | None:
+        current_activity = str(getattr(self, "current_activity", "") or "").strip()
+        activity_start_time = float(getattr(self, "activity_start_time", 0) or 0)
+        current_time = float(now_ts or time.time())
+        if not current_activity or activity_start_time <= 0 or current_time <= activity_start_time:
+            return None
+
+        duration = current_time - activity_start_time
+        if duration < self.LIVE_ACTIVITY_MIN_DURATION_SECONDS:
+            return None
+
+        activity_type, scene, window = self._parse_activity_marker(current_activity)
+        return {
+            "type": activity_type,
+            "scene": scene,
+            "window": window,
+            "start_time": activity_start_time,
+            "end_time": current_time,
+            "duration": float(duration),
+            "is_live": True,
+        }
+
+    def _get_activity_history_for_stats(self) -> list[dict[str, Any]]:
+        activity_history = list(getattr(self, "activity_history", []) or [])
+        current_snapshot = self._build_current_activity_snapshot()
+        if current_snapshot:
+            activity_history.append(current_snapshot)
+        return activity_history
 
     def _detect_window_changes(self):
         """检测窗口变化，包括新打开的窗口。"""
@@ -2944,6 +4213,463 @@ class ScreenCompanion(Star):
         
         return False, []
 
+    def _ensure_auto_screen_runtime_state(self, task_id: str) -> dict[str, Any]:
+        self._ensure_runtime_state()
+        normalized_task_id = str(task_id or self.AUTO_TASK_ID).strip() or self.AUTO_TASK_ID
+        runtime = self.auto_screen_runtime
+        state = runtime.get(normalized_task_id)
+        if not isinstance(state, dict):
+            state = {
+                "last_seen_window_title": "",
+                "last_scene": "",
+                "last_change_at": 0.0,
+                "last_change_reason": "",
+                "last_new_windows": [],
+                "last_trigger_at": 0.0,
+                "last_trigger_reason": "",
+                "last_effective_probability": 0,
+                "last_trigger_roll": None,
+                "last_idle_keepalive_due": False,
+                "last_sent_at": 0.0,
+                "last_reply_signature": "",
+                "last_reply_window_title": "",
+                "last_reply_scene": "",
+                "last_reply_preview": "",
+                "last_skip_reason": "",
+            }
+            runtime[normalized_task_id] = state
+        return state
+
+    def _build_auto_screen_change_snapshot(
+        self,
+        task_id: str,
+        *,
+        window_changed: bool = False,
+        new_windows: list[str] | None = None,
+        update_state: bool = True,
+    ) -> dict[str, Any]:
+        state = self._ensure_auto_screen_runtime_state(task_id)
+        active_window_title, _ = self._get_active_window_info()
+        active_window_title = self._normalize_window_title(active_window_title)
+        scene = ""
+        if active_window_title:
+            scene = self._normalize_scene_label(self._identify_scene(active_window_title))
+
+        previous_window_title = str(state.get("last_seen_window_title", "") or "").strip()
+        previous_scene = str(state.get("last_scene", "") or "").strip()
+        normalized_new_windows = [
+            title
+            for title in (self._normalize_window_title(title) for title in (new_windows or []))
+            if title
+        ]
+
+        reasons: list[str] = []
+        if window_changed and normalized_new_windows:
+            reasons.append("新窗口出现")
+        elif window_changed:
+            reasons.append("窗口列表变化")
+
+        if active_window_title and active_window_title.casefold() != previous_window_title.casefold():
+            reasons.append("活动窗口变化")
+
+        if scene and previous_scene and scene != previous_scene:
+            reasons.append("场景变化")
+
+        changed = bool(reasons)
+        now_ts = time.time()
+        if update_state:
+            state["last_seen_window_title"] = active_window_title
+            state["last_scene"] = scene
+            state["last_new_windows"] = normalized_new_windows[:3]
+            if changed:
+                state["last_change_at"] = now_ts
+                state["last_change_reason"] = "、".join(dict.fromkeys(reasons))
+
+        return {
+            "task_id": str(task_id or self.AUTO_TASK_ID).strip() or self.AUTO_TASK_ID,
+            "active_window_title": active_window_title,
+            "scene": scene,
+            "changed": changed,
+            "reason": "、".join(dict.fromkeys(reasons)),
+            "new_windows": normalized_new_windows[:3],
+            "timestamp": now_ts,
+        }
+
+    def _is_idle_keepalive_due(self, task_id: str, check_interval: int) -> bool:
+        state = self._ensure_auto_screen_runtime_state(task_id)
+        last_sent_at = float(state.get("last_sent_at", 0.0) or 0.0)
+        if last_sent_at <= 0:
+            return True
+
+        threshold = max(
+            int(check_interval or 0) * 3,
+            self.CHANGE_AWARE_IDLE_KEEPALIVE_SECONDS,
+        )
+        return (time.time() - last_sent_at) >= threshold
+
+    def _decide_auto_screen_trigger(
+        self,
+        task_id: str,
+        *,
+        probability: int,
+        check_interval: int,
+        system_high_load: bool,
+        change_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        import random
+
+        state = self._ensure_auto_screen_runtime_state(task_id)
+        now_ts = time.time()
+        if system_high_load:
+            decision = {
+                "trigger": True,
+                "reason": "系统负载较高，强制触发识屏",
+                "effective_probability": 100,
+                "random_number": None,
+                "idle_keepalive_due": False,
+            }
+        else:
+            idle_keepalive_due = self._is_idle_keepalive_due(task_id, check_interval)
+            if change_snapshot.get("changed"):
+                effective_probability = min(100, max(int(probability or 0), 85))
+                reason = f"检测到{change_snapshot.get('reason') or '窗口变化'}，提升本轮触发概率"
+            elif idle_keepalive_due:
+                effective_probability = min(100, max(int(probability or 0), 30))
+                reason = "当前窗口停留较久，保留一次低频跟进机会"
+            else:
+                effective_probability = min(int(probability or 0), 15)
+                reason = "当前画面变化不大，降低本轮触发概率"
+
+            random_number = random.randint(1, 100)
+            decision = {
+                "trigger": random_number <= effective_probability,
+                "reason": reason,
+                "effective_probability": effective_probability,
+                "random_number": random_number,
+                "idle_keepalive_due": idle_keepalive_due,
+            }
+
+        state["last_trigger_reason"] = decision["reason"]
+        state["last_effective_probability"] = int(decision["effective_probability"] or 0)
+        state["last_trigger_roll"] = decision["random_number"]
+        state["last_idle_keepalive_due"] = bool(decision["idle_keepalive_due"])
+        if decision["trigger"]:
+            state["last_trigger_at"] = now_ts
+            state["last_skip_reason"] = ""
+        return decision
+
+    def _should_skip_similar_auto_reply(
+        self,
+        task_id: str,
+        *,
+        active_window_title: str,
+        text_content: str,
+        check_interval: int,
+    ) -> tuple[bool, str]:
+        normalized_text = self._normalize_record_text(text_content)[:160]
+        if not normalized_text:
+            return False, ""
+
+        state = self._ensure_auto_screen_runtime_state(task_id)
+        last_signature = str(state.get("last_reply_signature", "") or "").strip()
+        last_window_title = self._normalize_window_title(
+            state.get("last_reply_window_title", "")
+        )
+        current_window_title = self._normalize_window_title(active_window_title)
+        last_sent_at = float(state.get("last_sent_at", 0.0) or 0.0)
+        cooldown_seconds = max(
+            int(check_interval or 0) * 3,
+            self.CHANGE_AWARE_SIMILAR_REPLY_COOLDOWN_SECONDS,
+        )
+
+        if (
+            normalized_text
+            and last_signature == normalized_text
+            and current_window_title
+            and current_window_title.casefold() == last_window_title.casefold()
+            and last_sent_at > 0
+            and (time.time() - last_sent_at) < cooldown_seconds
+        ):
+            return (
+                True,
+                f"同一窗口下识别结果相近，仍在 {cooldown_seconds} 秒冷却内",
+            )
+
+        return False, ""
+
+    def _remember_auto_reply_state(
+        self,
+        task_id: str,
+        *,
+        active_window_title: str,
+        text_content: str,
+        sent: bool,
+        scene: str = "",
+        note: str = "",
+    ) -> None:
+        state = self._ensure_auto_screen_runtime_state(task_id)
+        normalized_text = self._normalize_record_text(text_content)[:160]
+        state["last_reply_window_title"] = self._normalize_window_title(active_window_title)
+        state["last_reply_scene"] = self._normalize_scene_label(scene)
+        if normalized_text:
+            state["last_reply_signature"] = normalized_text
+        state["last_reply_preview"] = self._truncate_preview_text(text_content, limit=120)
+        state["last_skip_reason"] = str(note or "").strip()
+        if sent:
+            state["last_sent_at"] = time.time()
+
+    def _remember_recent_user_activity(self, event: AstrMessageEvent) -> None:
+        self._ensure_runtime_state()
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        if not umo:
+            return
+
+        self.recent_user_activity[umo] = time.time()
+        if len(self.recent_user_activity) > 100:
+            sorted_items = sorted(
+                self.recent_user_activity.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            self.recent_user_activity = dict(sorted_items[:100])
+
+    def _get_recent_user_activity_at(self, target_or_event: Any = None) -> float:
+        self._ensure_runtime_state()
+        umo = ""
+        if isinstance(target_or_event, str):
+            umo = str(target_or_event or "").strip()
+        elif target_or_event is not None:
+            umo = str(getattr(target_or_event, "unified_msg_origin", "") or "").strip()
+
+        if not umo:
+            return 0.0
+        return float(self.recent_user_activity.get(umo, 0.0) or 0.0)
+
+    def _should_defer_for_recent_user_activity(
+        self,
+        event: AstrMessageEvent,
+        *,
+        task_id: str,
+        change_snapshot: dict[str, Any],
+    ) -> tuple[bool, str]:
+        last_activity_at = self._get_recent_user_activity_at(event)
+        if last_activity_at <= 0:
+            return False, ""
+
+        seconds_since = max(0, int(time.time() - last_activity_at))
+        grace_seconds = self.USER_ACTIVITY_GRACE_SECONDS
+        if change_snapshot.get("changed"):
+            grace_seconds = self.USER_ACTIVITY_CHANGE_GRACE_SECONDS
+
+        if seconds_since >= grace_seconds:
+            return False, ""
+
+        reason = (
+            f"用户刚在 {seconds_since} 秒前发过消息，先暂缓这次主动打断"
+        )
+        self._ensure_auto_screen_runtime_state(task_id)["last_skip_reason"] = reason
+        return True, reason
+
+    def _get_scene_behavior_profile(self, scene: str) -> dict[str, Any]:
+        normalized_scene = self._normalize_scene_label(scene)
+        entertainment_scenes = {"视频", "游戏", "浏览-娱乐", "音乐", "社交"}
+        work_scenes = {"编程", "设计", "办公", "学习", "阅读", "浏览", "浏览-工作"}
+
+        if normalized_scene in entertainment_scenes:
+            return {
+                "category": "entertainment",
+                "same_window_cooldown": self.ENTERTAINMENT_WINDOW_MESSAGE_COOLDOWN_SECONDS,
+                "tone_instruction": "语气更像陪伴和轻提醒，不要频繁推进任务，也不要把用户从内容里拽出来。",
+                "prefer_sample_only": False,
+            }
+        if normalized_scene in work_scenes:
+            return {
+                "category": "work",
+                "same_window_cooldown": self.WORK_WINDOW_MESSAGE_COOLDOWN_SECONDS,
+                "tone_instruction": "语气保持克制、直接、任务导向，优先指出卡点、下一步和可立即执行的建议。",
+                "prefer_sample_only": True,
+            }
+        return {
+            "category": "general",
+            "same_window_cooldown": self.GENERAL_WINDOW_MESSAGE_COOLDOWN_SECONDS,
+            "tone_instruction": "语气自然、简短，既给出帮助，也尽量避免抢占注意力。",
+            "prefer_sample_only": True,
+        }
+
+    def _should_skip_same_window_followup(
+        self,
+        task_id: str,
+        *,
+        active_window_title: str,
+        scene: str,
+    ) -> tuple[bool, str]:
+        state = self._ensure_auto_screen_runtime_state(task_id)
+        current_window_title = self._normalize_window_title(active_window_title)
+        last_window_title = self._normalize_window_title(
+            state.get("last_reply_window_title", "")
+        )
+        if not current_window_title or current_window_title.casefold() != last_window_title.casefold():
+            return False, ""
+
+        last_sent_at = float(state.get("last_sent_at", 0.0) or 0.0)
+        if last_sent_at <= 0:
+            return False, ""
+
+        profile = self._get_scene_behavior_profile(scene)
+        cooldown_seconds = int(profile.get("same_window_cooldown", 0) or 0)
+        elapsed = time.time() - last_sent_at
+        if elapsed >= cooldown_seconds:
+            return False, ""
+
+        reason = (
+            f"同一窗口《{current_window_title}》仍在冷却中，距离上次主动消息仅 {int(max(0, elapsed))} 秒"
+        )
+        state["last_skip_reason"] = reason
+        return True, reason
+
+    def _truncate_preview_text(self, text: str, limit: int = 120) -> str:
+        preview = str(text or "").strip().replace("\r", " ").replace("\n", " ")
+        if len(preview) <= limit:
+            return preview
+        return preview[: max(0, limit - 1)] + "…"
+
+    def _remember_screen_analysis_trace(self, trace: dict[str, Any] | None) -> None:
+        if not isinstance(trace, dict):
+            return
+
+        cleaned = dict(trace)
+        cleaned.setdefault("timestamp", datetime.datetime.now().isoformat())
+        for key in (
+            "task_id",
+            "trigger_reason",
+            "media_kind",
+            "analysis_material_kind",
+            "sampling_strategy",
+            "recognition_summary",
+            "reply_preview",
+            "active_window_title",
+            "scene",
+            "status",
+        ):
+            cleaned[key] = str(cleaned.get(key, "") or "").strip()
+
+        cleaned["stored_as_observation"] = bool(cleaned.get("stored_as_observation", False))
+        cleaned["stored_in_diary"] = bool(cleaned.get("stored_in_diary", False))
+        cleaned["memory_hints"] = list(cleaned.get("memory_hints", []) or [])[:4]
+        cleaned["frame_labels"] = list(cleaned.get("frame_labels", []) or [])[:4]
+        cleaned["frame_count"] = int(cleaned.get("frame_count", 0) or 0)
+        cleaned["used_full_video"] = bool(cleaned.get("used_full_video", False))
+
+        self.screen_analysis_traces.append(cleaned)
+        if len(self.screen_analysis_traces) > self.SCREEN_TRACE_LIMIT:
+            self.screen_analysis_traces = self.screen_analysis_traces[-self.SCREEN_TRACE_LIMIT :]
+
+    def _get_recent_screen_analysis_traces(self, limit: int = 8) -> list[dict[str, Any]]:
+        traces = list(getattr(self, "screen_analysis_traces", []) or [])
+        if limit > 0:
+            traces = traces[-limit:]
+        return list(reversed(traces))
+
+    @staticmethod
+    def _format_runtime_timestamp(timestamp: float | int | None) -> str:
+        try:
+            value = float(timestamp or 0)
+        except Exception:
+            value = 0.0
+        if value <= 0:
+            return "未记录"
+        return datetime.datetime.fromtimestamp(value).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _resolve_webui_access_url(self) -> str:
+        if not self.webui_enabled:
+            return "未启用"
+        if not self.web_server or not getattr(self.web_server, "_started", False):
+            return "已启用但未运行"
+
+        port = getattr(self.web_server, "port", self.webui_port)
+        host = self.webui_host
+        if host == "0.0.0.0":
+            host = "127.0.0.1"
+        return f"http://{host}:{port}"
+
+    async def _build_kpi_doctor_report(self, event: AstrMessageEvent) -> str:
+        self._ensure_runtime_state()
+
+        current_check_interval, current_probability = self._get_current_preset_params()
+        active_task_ids = list(self.auto_tasks.keys())
+        focus_task_id = (
+            self.AUTO_TASK_ID
+            if self.AUTO_TASK_ID in self.auto_tasks
+            else (active_task_ids[0] if active_task_ids else self.AUTO_TASK_ID)
+        )
+        auto_state = self._ensure_auto_screen_runtime_state(focus_task_id)
+        current_change_snapshot = self._build_auto_screen_change_snapshot(
+            focus_task_id,
+            update_state=False,
+        )
+        active_window_title = (
+            current_change_snapshot.get("active_window_title")
+            or auto_state.get("last_seen_window_title")
+            or "未知"
+        )
+        if auto_state.get("last_change_at"):
+            latest_change_reason = auto_state.get("last_change_reason") or "最近有变化"
+        elif self.is_running:
+            latest_change_reason = (
+                "当前窗口有变化"
+                if current_change_snapshot.get("changed")
+                else "最近未检测到明显变化"
+            )
+        else:
+            latest_change_reason = "自动观察未运行，当前仅展示前台窗口"
+
+        provider = self.context.get_using_provider()
+        umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
+        provider_id = await self._get_current_chat_provider_id(umo=umo)
+        provider_info = self._resolve_provider_runtime_info(provider_id=provider_id, provider=provider)
+        model_label = provider_info.get("model") or getattr(provider, "model_name", "") or getattr(provider, "model", "") or "未知"
+        provider_label = provider_info.get("provider_id") or getattr(provider, "id", "") or "未识别"
+
+        env_ok, env_msg = self._check_env(check_mic=False)
+        mode = "录屏" if self._use_screen_recording_mode() else "截图"
+        ffmpeg_label = "未使用"
+        encoder_label = "未使用"
+        if self._use_screen_recording_mode():
+            ffmpeg_path = self._get_ffmpeg_path()
+            ffmpeg_label = ffmpeg_path if ffmpeg_path else "未检测到 ffmpeg"
+            encoder_label = self._get_recording_video_encoder()
+
+        diary_status = "开启" if self.enable_diary else "关闭"
+        last_diary_label = (
+            self.last_diary_date.strftime("%Y-%m-%d")
+            if isinstance(self.last_diary_date, datetime.date)
+            else "未生成"
+        )
+        target = self._resolve_proactive_target(event) or "未配置"
+        webui_url = self._resolve_webui_access_url()
+        custom_task_count = max(0, len(active_task_ids) - (1 if self.AUTO_TASK_ID in active_task_ids else 0))
+        recent_user_activity_at = self._get_recent_user_activity_at(event)
+
+        lines = [
+            "屏幕伙伴自检",
+            f"运行状态：{'已启用' if self.enabled else '未启用'} / 当前状态 {self.state} / 自动观察 {'运行中' if self.is_running else '未运行'}",
+            f"任务概览：主任务 {focus_task_id} / 运行中 {len(active_task_ids)} 个 / 自定义任务 {custom_task_count} 个",
+            f"识屏模式：{mode} / 间隔 {current_check_interval} 秒 / 基础概率 {current_probability}%",
+            f"变化感知：当前窗口《{active_window_title}》 / 最近变化 {latest_change_reason} / 最近变化时间 {self._format_runtime_timestamp(auto_state.get('last_change_at'))}",
+            f"最近判定：{auto_state.get('last_trigger_reason') or '暂未判定'} / 生效概率 {auto_state.get('last_effective_probability', 0)}% / 随机数 {auto_state.get('last_trigger_roll') if auto_state.get('last_trigger_roll') is not None else '未记录'}",
+            f"最近手动消息：{self._format_runtime_timestamp(recent_user_activity_at)}",
+            f"最近主动消息：{self._format_runtime_timestamp(auto_state.get('last_sent_at'))} / 预览 {auto_state.get('last_reply_preview') or '暂无'}",
+            f"相似去重：{auto_state.get('last_skip_reason') or '最近没有命中去重'}",
+            f"主动目标：{target}",
+            f"模型提供方：{provider_label} / 模型 {model_label}",
+            f"视觉链路：外部视觉 {'开启' if self._get_runtime_flag('use_external_vision') else '关闭'} / 视频直连兜底 {'开启' if self._get_runtime_flag('allow_unsafe_video_direct_fallback') else '关闭'}",
+            f"录屏参数：{self._get_recording_duration_seconds()} 秒 @ {self._get_recording_fps():.2f} fps / 编码器 {encoder_label} / ffmpeg {ffmpeg_label}",
+            f"观察与日记：观察 {len(self.observations)} 条 / 待写日记 {len(self.diary_entries)} 条 / 日记 {diary_status} / 计划时间 {self.diary_time} / 最近日记 {last_diary_label}",
+            f"WebUI：{webui_url}",
+            f"环境检查：{'正常' if env_ok else env_msg}",
+        ]
+        return "\n".join(lines)
+
     def _adjust_interaction_frequency(self, user_response):
         """根据用户回应调整互动频率。"""
         # 简单估算参与度：结合回复长度与内容变化
@@ -2991,6 +4717,16 @@ class ScreenCompanion(Star):
                 self.state = "inactive"
                 self.enable_mic_monitor = False
                 self.window_companion_active_title = ""
+                now_ts = time.time()
+                if self.current_activity and self.activity_start_time:
+                    self._append_activity_record(
+                        activity=self.current_activity,
+                        start_time=self.activity_start_time,
+                        end_time=now_ts,
+                        min_duration_seconds=self.LIVE_ACTIVITY_MIN_DURATION_SECONDS,
+                    )
+                    self.current_activity = None
+                    self.activity_start_time = None
                 
                 # 停止 Web 服务器
                 if self.web_server:
@@ -3589,6 +5325,7 @@ class ScreenCompanion(Star):
             "mime_type": "video/mp4",
             "media_bytes": video_bytes,
             "active_window_title": active_window_title,
+            "duration_seconds": self._get_recording_duration_seconds(),
             "source_label": active_window_title or "最近一段桌面录屏",
         }
 
@@ -3635,6 +5372,7 @@ class ScreenCompanion(Star):
                 "mime_type": "video/mp4",
                 "media_bytes": video_bytes,
                 "active_window_title": active_window_title,
+                "duration_seconds": duration,
                 "source_label": active_window_title
                 or "\u624b\u52a8\u5f55\u5236\u7684\u6700\u8fd1 10 \u79d2\u684c\u9762\u5f55\u5c4f",
             }
@@ -4242,6 +5980,10 @@ class ScreenCompanion(Star):
                 self._capture_recognition_context(),
                 timeout=effective_capture_timeout,
             )
+        capture_context.setdefault(
+            "trigger_reason",
+            "用户手动发起识屏请求" if task_id.startswith("manual") or task_id in {"manual", "manual_recording"} else f"任务 {task_id} 发起识屏",
+        )
         media_bytes = capture_context["media_bytes"]
         media_kind = str(capture_context.get("media_kind", "image") or "image")
         active_window_title = capture_context.get("active_window_title", "")
@@ -4307,6 +6049,7 @@ class ScreenCompanion(Star):
             if debug_mode:
                 logger.debug(f"[{task_id}] 添加对话历史失败: {e}")
 
+        self._remember_screen_analysis_trace(capture_context.get("_analysis_trace"))
         return screen_result
 
     def _check_recording_env(self, check_mic: bool = False) -> tuple[bool, str]:
@@ -4797,6 +6540,25 @@ class ScreenCompanion(Star):
         mime_type = str(capture_context.get("mime_type", "image/jpeg") or "image/jpeg")
         media_bytes = capture_context.get("media_bytes", b"") or b""
         use_external_vision = self._get_runtime_flag("use_external_vision")
+        effective_use_external_vision = use_external_vision
+        analysis_trace = {
+            "task_id": task_id,
+            "trigger_reason": str(capture_context.get("trigger_reason", "") or ""),
+            "media_kind": media_kind,
+            "analysis_material_kind": media_kind,
+            "sampling_strategy": "",
+            "frame_count": 0,
+            "frame_labels": [],
+            "active_window_title": active_window_title,
+            "scene": "",
+            "recognition_summary": "",
+            "reply_preview": "",
+            "stored_as_observation": False,
+            "stored_in_diary": False,
+            "used_full_video": media_kind == "video",
+            "status": "running",
+            "memory_hints": [],
+        }
 
         analysis_context = await self._gather_screen_analysis_context(
             active_window_title=active_window_title,
@@ -4808,6 +6570,7 @@ class ScreenCompanion(Star):
         holiday_prompt = analysis_context["holiday_prompt"]
         system_status_prompt = analysis_context["system_status_prompt"]
         weather_prompt = analysis_context["weather_prompt"]
+        analysis_trace["scene"] = scene
 
         contexts = await self._collect_recent_conversation_context(
             session,
@@ -4822,16 +6585,90 @@ class ScreenCompanion(Star):
                 logger.debug(f"Mime type: {mime_type}")
                 logger.debug(f"Media size: {len(media_bytes)} bytes")
 
+            effective_capture_context = capture_context
+            effective_media_kind = media_kind
+            effective_mime_type = mime_type
+            effective_media_bytes = media_bytes
+            material_label = "录屏视频" if media_kind == "video" else "截图"
+            sampling_profile = self._get_scene_behavior_profile(scene)
+            sampled_capture_context = None
+            recognition_capture_context = capture_context
+
+            if media_kind == "video":
+                sampled_capture_context = await self._build_video_sample_capture_context(
+                    capture_context,
+                    scene=scene,
+                    use_external_vision=effective_use_external_vision,
+                )
+                if sampled_capture_context:
+                    analysis_trace["sampling_strategy"] = str(
+                        sampled_capture_context.get("sampling_strategy", "keyframe_sheet")
+                    )
+                    analysis_trace["frame_count"] = int(
+                        sampled_capture_context.get("frame_count", 0) or 0
+                    )
+                    analysis_trace["frame_labels"] = list(
+                        sampled_capture_context.get("frame_labels", []) or []
+                    )
+                    if self._should_keep_sampled_video_only(
+                        scene,
+                        use_external_vision=use_external_vision,
+                    ):
+                        effective_capture_context = sampled_capture_context
+                        effective_media_kind = str(
+                            sampled_capture_context.get("media_kind", "image") or "image"
+                        )
+                        effective_mime_type = str(
+                            sampled_capture_context.get("mime_type", "image/jpeg")
+                            or "image/jpeg"
+                        )
+                        effective_media_bytes = (
+                            sampled_capture_context.get("media_bytes", b"") or b""
+                        )
+                        material_label = "录屏关键帧拼图"
+                        analysis_trace["analysis_material_kind"] = effective_media_kind
+                        analysis_trace["used_full_video"] = False
+                        if use_external_vision:
+                            recognition_capture_context = sampled_capture_context
+
             recognition_text = await self._recognize_screen_material(
-                capture_context=capture_context,
-                use_external_vision=use_external_vision,
+                capture_context=recognition_capture_context,
+                use_external_vision=effective_use_external_vision,
                 scene=scene,
                 active_window_title=active_window_title,
             )
+            if (
+                media_kind == "video"
+                and effective_use_external_vision
+                and sampled_capture_context is not None
+                and recognition_capture_context is sampled_capture_context
+                and self._looks_uncertain_screen_result(recognition_text)
+            ):
+                recognition_text = await self._recognize_screen_material(
+                    capture_context=capture_context,
+                    use_external_vision=effective_use_external_vision,
+                    scene=scene,
+                    active_window_title=active_window_title,
+                )
+                analysis_trace["analysis_material_kind"] = "video"
+                analysis_trace["used_full_video"] = True
+                material_label = "录屏视频"
 
-            material_label = "录屏视频" if media_kind == "video" else "截图"
+            if effective_use_external_vision and self._is_screen_error_text(recognition_text):
+                logger.warning(
+                    f"[任务 {task_id}] 外部视觉识别失败，尝试回退到当前 provider 多模态链路: {recognition_text}"
+                )
+                effective_use_external_vision = False
+                recognition_text = ""
+                analysis_trace["sampling_strategy"] = (
+                    f"{analysis_trace['sampling_strategy']}+provider_fallback"
+                    if analysis_trace["sampling_strategy"]
+                    else "provider_fallback"
+                )
+                analysis_trace["analysis_material_kind"] = effective_media_kind
+
             prompt_parts: list[str] = []
-            if use_external_vision:
+            if effective_use_external_vision:
                 prompt_parts.extend(
                     [
                         "你是屏幕伴侣，请结合下面的识屏结果与对话上下文，自然地继续陪伴用户。",
@@ -4855,6 +6692,7 @@ class ScreenCompanion(Star):
                 prompt_parts.append("最近对话：\n" + "\n".join(contexts))
 
             related_memories = self._trigger_related_memories(scene, active_window_title)
+            analysis_trace["memory_hints"] = related_memories[:4]
             if related_memories:
                 memory_lines = "\n".join(f"- {memory}" for memory in related_memories[:3])
                 prompt_parts.append("可参考的相关记忆：\n" + memory_lines)
@@ -4894,6 +6732,8 @@ class ScreenCompanion(Star):
                 if system_status_prompt:
                     prompt_parts.append(f"系统状态：{system_status_prompt}")
 
+            prompt_parts.append(f"语气控制：{sampling_profile['tone_instruction']}")
+
             if self._is_in_rest_reminder_range():
                 prompt_parts.append(
                     "如果用户看起来已经持续工作较久，可以顺带轻提醒对方休息一下，但不要打断当前任务。"
@@ -4913,8 +6753,10 @@ class ScreenCompanion(Star):
                     "如果语气自然，可以轻轻表达你也想和用户一起做点轻松的事，但必须低频、顺势，不能打断正事。"
                 )
 
-            if scene in ("游戏", "视频"):
-                prompt_parts.append("可以更自然地表达陪伴感，但不要抢用户注意力。")
+            if sampling_profile["category"] == "entertainment":
+                prompt_parts.append("更偏轻声陪伴和顺势提醒，不要过度推动任务。")
+            elif sampling_profile["category"] == "work":
+                prompt_parts.append("建议尽量收束成 1 到 2 个具体判断或下一步。")
             else:
                 prompt_parts.append("回复尽量简短、具体、贴近当前任务。")
 
@@ -4923,16 +6765,18 @@ class ScreenCompanion(Star):
             try:
                 interaction_response = await self._request_screen_interaction(
                     provider=provider,
-                    use_external_vision=use_external_vision,
+                    use_external_vision=effective_use_external_vision,
                     interaction_prompt=interaction_prompt,
                     system_prompt=system_prompt,
-                    media_bytes=media_bytes,
-                    media_kind=media_kind,
-                    mime_type=mime_type,
+                    media_bytes=effective_media_bytes,
+                    media_kind=effective_media_kind,
+                    mime_type=effective_mime_type,
                     umo=umo,
                 )
             except asyncio.TimeoutError:
                 logger.error("LLM 响应超时")
+                analysis_trace["status"] = "timeout"
+                capture_context["_analysis_trace"] = analysis_trace
                 return [Plain("这次识屏响应超时了，请稍后再试。")]
 
             response_text = "我看过了，但这一轮还没成功生成回复。"
@@ -4945,18 +6789,48 @@ class ScreenCompanion(Star):
             elif debug_mode:
                 logger.warning("模型返回为空")
 
-            if not use_external_vision:
+            if not effective_use_external_vision:
                 recognition_text = self._compress_recognition_text(response_text)
 
-            observation_stored = self._add_observation(
-                scene, recognition_text or response_text, active_window_title
+            analysis_trace["recognition_summary"] = self._truncate_preview_text(
+                recognition_text or response_text,
+                limit=120,
             )
+            observation_stored = self._add_observation(
+                scene,
+                recognition_text or response_text,
+                active_window_title,
+                extra={
+                    "trigger_reason": analysis_trace["trigger_reason"],
+                    "material_kind": media_kind,
+                    "analysis_material_kind": analysis_trace["analysis_material_kind"],
+                    "sampling_strategy": analysis_trace["sampling_strategy"],
+                    "frame_count": analysis_trace["frame_count"],
+                    "frame_labels": analysis_trace["frame_labels"],
+                    "recognition_summary": analysis_trace["recognition_summary"],
+                    "used_full_video": analysis_trace["used_full_video"],
+                },
+            )
+            analysis_trace["stored_as_observation"] = observation_stored
             if observation_stored:
-                self._update_long_term_memory(scene, active_window_title, 1)
+                self._update_long_term_memory(
+                    scene,
+                    active_window_title,
+                    1,
+                    memory_summary=recognition_text or response_text,
+                    response_preview=response_text,
+                )
 
             self._update_activity(scene, active_window_title)
             response_text = self._polish_response_text(response_text, scene)
+            analysis_trace["reply_preview"] = self._truncate_preview_text(
+                response_text,
+                limit=140,
+            )
+            analysis_trace["status"] = "ok"
+            capture_context["_analysis_trace"] = analysis_trace
             self._adjust_interaction_frequency(response_text)
+            self._record_screen_analysis_result(True)
 
         except Exception as e:
             logger.error(f"识屏分析失败: {e}")
@@ -4974,11 +6848,10 @@ class ScreenCompanion(Star):
                 error_type = "vision"
                 error_text = "当前模型暂时不支持这次多模态识别，请检查视觉配置。"
 
-            if error_type != "timeout":
-                self._add_diary_entry(
-                    f"[识屏异常-{error_type}] {error_text}", active_window_title
-                )
-
+            analysis_trace["status"] = f"error:{error_type}"
+            analysis_trace["reply_preview"] = error_text
+            capture_context["_analysis_trace"] = analysis_trace
+            self._record_screen_analysis_result(False, error_type=error_type)
             return [Plain(error_text)]
 
         if media_kind != "image":
@@ -5130,6 +7003,7 @@ class ScreenCompanion(Star):
             message_text = str(getattr(event, "message_str", "") or "").strip()
             if not message_text or message_text.startswith("/"):
                 return
+            self._remember_recent_user_activity(event)
             self._learn_shared_activity_from_message(message_text)
         except Exception as e:
             logger.debug(f"记录共同经历失败: {e}")
@@ -5257,7 +7131,7 @@ class ScreenCompanion(Star):
     async def kpi_ys(self, event: AstrMessageEvent, preset_index: int = None):
         """切换预设。"""
         if preset_index is None:
-            async for result in self.kpi_presets(event):
+            async for result in self._render_preset_list(event):
                 yield result
             return
         
@@ -5354,8 +7228,7 @@ class ScreenCompanion(Star):
             end_response = await self._get_end_response(event.unified_msg_origin)
             yield event.plain_result(f"已停止所有自动观察任务。\n{end_response}")
 
-    @kpi_group.command("webui")
-    async def webui_command(self, event: AstrMessageEvent):
+    async def _render_webui_status(self, event: AstrMessageEvent):
         """查看 WebUI 信息。"""
         self._ensure_runtime_state()
         if self.webui_enabled:
@@ -5411,6 +7284,17 @@ class ScreenCompanion(Star):
             response = "WebUI 未启用，请在配置中开启。"
         
         yield event.plain_result(response)
+
+    async def _render_status_report(self, event: AstrMessageEvent):
+        """输出当前运行状态和关键诊断信息。"""
+        report = await self._build_kpi_doctor_report(event)
+        yield event.plain_result(report)
+
+    @kpi_group.command("status")
+    async def kpi_status(self, event: AstrMessageEvent):
+        """输出当前运行状态和关键诊断信息。"""
+        async for result in self._render_status_report(event):
+            yield result
 
     @kpi_group.command("list")
     async def kpi_list(self, event: AstrMessageEvent):
@@ -5507,9 +7391,8 @@ class ScreenCompanion(Star):
             f"已更新预设 {preset_index}：间隔 {interval} 秒，触发概率 {probability}%"
         )
 
-    @kpi_group.command("presets")
-    async def kpi_presets(self, event: AstrMessageEvent):
-        """列出所有自定义预设 /kpi presets"""
+    async def _render_preset_list(self, event: AstrMessageEvent):
+        """列出所有自定义预设 /kpi p"""
         if not self.parsed_custom_presets:
             yield event.plain_result(
                 "当前还没有自定义预设。\n"
@@ -5531,8 +7414,8 @@ class ScreenCompanion(Star):
 
     @kpi_group.command("p")
     async def kpi_p(self, event: AstrMessageEvent):
-        """列出全部自定义预设（简写命令）。"""
-        async for result in self.kpi_presets(event):
+        """列出全部自定义预设。"""
+        async for result in self._render_preset_list(event):
             yield result
 
     @kpi_group.command("add")
@@ -5565,15 +7448,9 @@ class ScreenCompanion(Star):
         except ValueError:
             yield event.plain_result("用法: /kpi add [间隔秒数] [自定义提示词]")
 
-    @kpi_group.command("diary")
-    async def kpi_diary(self, event: AstrMessageEvent, date: str = None):
-        """查看指定日期的日记。"""
-        async for result in self._handle_diary_command(event, date):
-            yield result
-
     @kpi_group.command("d")
     async def kpi_d(self, event: AstrMessageEvent, date: str = None):
-        """查看指定日期的日记（简写命令）。"""
+        """查看指定日期的日记。"""
         async for result in self._handle_diary_command(event, date):
             yield result
 
@@ -5601,7 +7478,12 @@ class ScreenCompanion(Star):
                 )
                 return
         else:
-            target_date = datetime.date.today()
+            now = datetime.datetime.now()
+            target_date = self._resolve_diary_target_date(now)
+            if now.hour < 2:
+                yield event.plain_result(
+                    f"当前时间还在凌晨两点前，默认查看 {target_date.strftime('%Y年%m月%d日')} 的日记。"
+                )
 
         # 构建日记文件路径
         diary_filename = f"diary_{target_date.strftime('%Y%m%d')}.md"
@@ -5921,15 +7803,20 @@ class ScreenCompanion(Star):
             yield event.plain_result("用法: /kpi debug [on/off]")
 
     @kpi_group.command("webui")
-    async def kpi_webui(self, event: AstrMessageEvent, action: str = "start"):
-        """控制 WebUI /kpi webui [start/stop]"""
-        if action.lower() == "start":
+    async def kpi_webui(self, event: AstrMessageEvent, action: str = ""):
+        """查看或控制 WebUI /kpi webui [start/stop]"""
+        action_text = str(action or "").strip().lower()
+        if not action_text:
+            async for result in self._render_webui_status(event):
+                yield result
+            return
+        if action_text == "start":
             if self.web_server:
                 yield event.plain_result("WebUI 已经在运行中。")
             else:
                 await self._start_webui()
                 yield event.plain_result(f"WebUI 已启动，访问地址: http://127.0.0.1:{self.webui_port}")
-        elif action.lower() == "stop":
+        elif action_text == "stop":
             if not self.web_server:
                 yield event.plain_result("WebUI 当前没有运行。")
             else:
@@ -5939,15 +7826,9 @@ class ScreenCompanion(Star):
         else:
             yield event.plain_result("无效操作，请使用 /kpi webui start 或 /kpi webui stop")
 
-    @kpi_group.command("complete")
-    async def kpi_complete(self, event: AstrMessageEvent, date: str = None):
-        """补写日记 /kpi complete [YYYY-MM-DD]"""
-        async for result in self._handle_complete_command(event, date):
-            yield result
-
     @kpi_group.command("cd")
     async def kpi_cd(self, event: AstrMessageEvent, date: str = None):
-        """补写日记（简化版）/kpi cd [YYYYMMDD]"""
+        """补写日记 /kpi cd [YYYYMMDD]"""
         async for result in self._handle_complete_command(event, date):
             yield result
 
@@ -6199,13 +8080,13 @@ class ScreenCompanion(Star):
     def _add_diary_entry(self, content: str, active_window: str):
         """添加日记条目。"""
         if not self.enable_diary:
-            return
+            return False
 
         import datetime
         should_store, reason = self._should_store_diary_entry(content, active_window)
         if not should_store:
             logger.info(f"跳过写入日记条目: {reason}")
-            return
+            return False
 
         now = datetime.datetime.now()
         entry = {
@@ -6215,6 +8096,7 @@ class ScreenCompanion(Star):
         }
         self.diary_entries.append(entry)
         logger.info(f"添加日记条目: {entry}")
+        return True
 
     async def _generate_diary(self, target_date: datetime.date | None = None):
         """生成日记。"""
@@ -6317,12 +8199,18 @@ class ScreenCompanion(Star):
             except Exception as e:
                 logger.error(f"生成日记总结失败: {e}")
 
+        structured_summary = self._build_diary_structured_summary(
+            compacted_entries,
+            reflection_text,
+        )
+
         diary_content = self._build_diary_document(
             target_date=target_date,
             weekday=weekday,
             weather_info=weather_info,
             observation_text=observation_text,
             reflection_text=reflection_text,
+            structured_summary=structured_summary,
         )
 
         # 保存日记文件
@@ -6332,6 +8220,10 @@ class ScreenCompanion(Star):
         try:
             with open(diary_path, "w", encoding="utf-8") as f:
                 f.write(diary_content)
+            self._save_diary_structured_summary(target_date, structured_summary)
+            self._remember_diary_summary_memories(target_date, structured_summary)
+            self._update_memory_priorities()
+            self._save_long_term_memory()
             logger.info(f"日记已保存到: {diary_path}")
 
             # 重置日记条目
@@ -6662,7 +8554,7 @@ class ScreenCompanion(Star):
     async def _task_scheduler(self):
         """后台任务调度器。"""
         self._ensure_runtime_state()
-        while self.running:
+        while self.running and self._is_current_process_instance():
             try:
                     # 从队列中获取任务
                 try:
@@ -6813,7 +8705,7 @@ class ScreenCompanion(Star):
 
             logger.warning(f"[麦克风依赖检查] 详细错误: {traceback.format_exc()}")
 
-        while self.enable_mic_monitor:
+        while self.enable_mic_monitor and self._is_current_process_instance():
             try:
                 if not mic_deps_ok:
                     await asyncio.sleep(60)
@@ -6852,7 +8744,12 @@ class ScreenCompanion(Star):
                         
                         # 定义临时任务函数
                         async def temp_mic_task():
+                            background_job_started = False
                             try:
+                                background_job_started, skip_reason = self._try_begin_background_screen_job()
+                                if not background_job_started:
+                                    logger.info(f"[{temp_task_id}] 跳过麦克风触发识屏: {skip_reason}")
+                                    return
                                 target = self._resolve_proactive_target()
                                 event = self._create_virtual_event(target)
 
@@ -6890,6 +8787,8 @@ class ScreenCompanion(Star):
                                 # 任务完成后清理临时任务
                                 if temp_task_id in self.temporary_tasks:
                                     del self.temporary_tasks[temp_task_id]
+                                if background_job_started:
+                                    self._finish_background_screen_job()
                                 if not self.auto_tasks and not self.temporary_tasks:
                                     self.state = current_state
 
@@ -6905,7 +8804,7 @@ class ScreenCompanion(Star):
                 logger.error(f"麦克风监听任务异常: {e}")
                 await asyncio.sleep(self.mic_check_interval)
 
-    def __init__(self, context: Context, config: dict):
+    def _legacy_duplicate_init_unused(self, context: Context, config: dict):
         import os
 
         super().__init__(context)
@@ -7007,6 +8906,8 @@ class ScreenCompanion(Star):
         self.current_activity = None  # 当前活动
         self.activity_start_time = None  # 活动开始时间
         self.activity_history = []  # 活动历史记录
+        self.activity_history_file = os.path.join(self.learning_storage, "activity_history.json")
+        self._load_activity_history()
 
         self.uncertainty_words = ["也许", "可能", "看起来", "我猜", "像是", "大概", "说不定", "似乎"]
 
@@ -7044,7 +8945,7 @@ class ScreenCompanion(Star):
     async def _custom_tasks_task(self):
         """后台自定义任务调度循环。"""
         self._ensure_runtime_state()
-        while self.running:
+        while self.running and self._is_current_process_instance():
             try:
                 now = datetime.datetime.now()
                 current_date = now.date()
@@ -7056,6 +8957,12 @@ class ScreenCompanion(Star):
                     task_key = f"{task['hour']}:{task['minute']}:{task['prompt']}"
                     # 检查今天是否已经执行过
                     if self.last_task_execution.get(task_key) == current_date:
+                        continue
+                    if task["hour"] != current_hour or task["minute"] != current_minute:
+                        continue
+                    if not self._try_mark_custom_task_dispatch(task_key):
+                        logger.info(f"跳过重复的自定义监控任务派发: {task['prompt']}")
+                        self.last_task_execution[task_key] = current_date
                         continue
                     
                     if (
@@ -7082,11 +8989,17 @@ class ScreenCompanion(Star):
                             
                             # 定义临时任务函数
                             async def temp_custom_task():
+                                background_job_started = False
                                 try:
+                                    background_job_started, skip_reason = self._try_begin_background_screen_job()
+                                    if not background_job_started:
+                                        logger.info(f"[{temp_task_id}] 跳过自定义监控识屏: {skip_reason}")
+                                        return
                                     capture_context = await asyncio.wait_for(
                                         self._capture_recognition_context(),
                                         timeout=self._get_capture_context_timeout(),
                                     )
+                                    capture_context["trigger_reason"] = f"定时提醒：{task['prompt']}"
                                     active_window_title = capture_context.get("active_window_title", "")
                                     components = await asyncio.wait_for(
                                         self._analyze_screen(
@@ -7102,12 +9015,19 @@ class ScreenCompanion(Star):
 
                                     # 确定消息发送目标
                                     target = self._resolve_proactive_target()
+                                    analysis_trace = capture_context.get("_analysis_trace", {}) or {}
 
                                     if target and await self._send_component_text(
                                         target,
                                         components,
                                         prefix="【定时提醒】",
                                     ):
+                                            analysis_trace["status"] = "sent"
+                                            analysis_trace["reply_preview"] = self._truncate_preview_text(
+                                                self._extract_plain_text(components),
+                                                limit=140,
+                                            )
+                                            self._remember_screen_analysis_trace(analysis_trace)
                                             logger.info("自定义任务提醒消息发送成功")
                                             
                                             # 如果处于休息提醒时间，更新冷却时间
@@ -7119,6 +9039,8 @@ class ScreenCompanion(Star):
                                     # 任务完成后清理临时任务
                                     if temp_task_id in self.temporary_tasks:
                                         del self.temporary_tasks[temp_task_id]
+                                    if background_job_started:
+                                        self._finish_background_screen_job()
                                     if not self.auto_tasks and not self.temporary_tasks:
                                         self.state = current_state
 
@@ -7144,7 +9066,7 @@ class ScreenCompanion(Star):
 
     async def _diary_task(self):
         """日记定时任务。"""
-        while self.running:
+        while self.running and self._is_current_process_instance():
             try:
                 now = datetime.datetime.now()
                 today = now.date()
@@ -7192,7 +9114,7 @@ class ScreenCompanion(Star):
         self._ensure_runtime_state()
         logger.info(f"[任务 {task_id}] 启动自动识屏任务")
         try:
-            while self.is_running and self.state == "active":
+            while self.is_running and self.state == "active" and self._is_current_process_instance():
                 if not self._is_in_active_time_range():
                     logger.info(f"[任务 {task_id}] 当前不在活跃时间段，准备停止任务")
                     # 清理任务
@@ -7220,6 +9142,8 @@ class ScreenCompanion(Star):
 
                 logger.info(f"[任务 {task_id}] 等待 {check_interval} 秒后进入触发判定")
                 elapsed = 0
+                window_changed = False
+                latest_new_windows: list[str] = []
                 while elapsed < check_interval:
                     if not self.is_running or self.state != "active":
                         logger.info(f"[任务 {task_id}] 任务状态已变化，停止等待")
@@ -7227,8 +9151,11 @@ class ScreenCompanion(Star):
                     try:
                         # 检测窗口变化
                         if elapsed % 3 == 0:  # 每3秒检测一次窗口变化
-                            window_changed, new_windows = self._detect_window_changes()
-                            if window_changed and new_windows:
+                            latest_window_changed, new_windows = self._detect_window_changes()
+                            if latest_window_changed:
+                                window_changed = True
+                                latest_new_windows = list(new_windows or [])
+                            if latest_window_changed and new_windows:
                                 logger.info(f"[任务 {task_id}] 检测到新打开的窗口: {new_windows}")
                                 # 可以在这里添加对新窗口的处理逻辑
                                 # 例如：发送通知、自动开始陪伴等
@@ -7296,28 +9223,31 @@ class ScreenCompanion(Star):
                     logger.debug(f"[任务 {task_id}] 系统状态检测失败: {e}")
 
                 # 高负载时强制触发一次识屏
-                trigger = False
-                if system_high_load:
-                    trigger = True
-                    logger.info(f"[任务 {task_id}] 系统资源占用较高，强制触发识屏")
+                change_snapshot = self._build_auto_screen_change_snapshot(
+                    task_id,
+                    window_changed=window_changed,
+                    new_windows=latest_new_windows,
+                )
+                logger.info(
+                    f"[任务 {task_id}] 变化感知: changed={change_snapshot['changed']}, "
+                    f"window={change_snapshot['active_window_title'] or '未知'}, "
+                    f"reason={change_snapshot['reason'] or '无明显变化'}"
+                )
+                decision = self._decide_auto_screen_trigger(
+                    task_id,
+                    probability=probability,
+                    check_interval=check_interval,
+                    system_high_load=system_high_load,
+                    change_snapshot=change_snapshot,
+                )
+                trigger = bool(decision["trigger"])
+                if decision["random_number"] is None:
+                    logger.info(f"[任务 {task_id}] {decision['reason']}")
                 else:
-                    # 获取当前预设参数
-                    check_interval, probability = self._get_current_preset_params()
-                    
-                    # 进入触发判定
-                    import random
-
-                    logger.info(f"[任务 {task_id}] 当前触发概率 {probability}%")
-
-                    logger.info(f"[任务 {task_id}] 开始进行随机触发判定")
-                    # 生成随机数并判断是否触发
-                    random_number = random.randint(1, 100)
                     logger.info(
-                        f"[任务 {task_id}] 触发判定详情: 随机数={random_number}, 触发概率={probability}%"
+                        f"[任务 {task_id}] {decision['reason']}，随机数={decision['random_number']}，"
+                        f"生效概率={decision['effective_probability']}%"
                     )
-
-                    if random_number <= probability:
-                        trigger = True
 
                 # 检查是否已经停止
                 if not self.is_running or self.state != "active":
@@ -7331,6 +9261,15 @@ class ScreenCompanion(Star):
                 if trigger:
                     logger.info(f"[任务 {task_id}] 满足触发条件，准备执行识屏分析")
                     try:
+                        should_defer, defer_reason = self._should_defer_for_recent_user_activity(
+                            event,
+                            task_id=task_id,
+                            change_snapshot=change_snapshot,
+                        )
+                        if should_defer:
+                            logger.info(f"[任务 {task_id}] 主动识屏暂缓: {defer_reason}")
+                            continue
+
                         if not self.is_running or self.state != "active":
                             logger.info(
                                 f"[任务 {task_id}] 任务停止标志已设置，取消本次屏幕分析"
@@ -7360,6 +9299,7 @@ class ScreenCompanion(Star):
                             self._capture_recognition_context(),
                             timeout=self._get_capture_context_timeout(),
                         )
+                        capture_context["trigger_reason"] = decision["reason"]
                         active_window_title = capture_context.get("active_window_title", "")
 
                         # 检查是否运行中
@@ -7392,9 +9332,63 @@ class ScreenCompanion(Star):
                         chain = self._build_message_chain(components)
                         target = self._resolve_proactive_target(event)
                         text_content = self._extract_plain_text(components)
+                        analysis_trace = capture_context.get("_analysis_trace", {}) or {}
+                        current_scene = str(
+                            analysis_trace.get("scene")
+                            or change_snapshot.get("scene")
+                            or ""
+                        ).strip()
+                        skip_similar, skip_reason = self._should_skip_similar_auto_reply(
+                            task_id,
+                            active_window_title=active_window_title,
+                            text_content=text_content,
+                            check_interval=check_interval,
+                        )
+
+                        if skip_similar:
+                            logger.info(f"[任务 {task_id}] 主动回复已跳过: {skip_reason}")
+                            self._remember_auto_reply_state(
+                                task_id,
+                                active_window_title=active_window_title,
+                                text_content=text_content,
+                                sent=False,
+                                scene=current_scene,
+                                note=skip_reason,
+                            )
+                            analysis_trace["status"] = "skipped_similar"
+                            analysis_trace["reply_preview"] = self._truncate_preview_text(
+                                text_content,
+                                limit=140,
+                            )
+                            self._remember_screen_analysis_trace(analysis_trace)
+                            continue
+
+                        skip_window_limit, window_limit_reason = self._should_skip_same_window_followup(
+                            task_id,
+                            active_window_title=active_window_title,
+                            scene=current_scene,
+                        )
+                        if skip_window_limit:
+                            logger.info(f"[任务 {task_id}] 主动回复已降频: {window_limit_reason}")
+                            self._remember_auto_reply_state(
+                                task_id,
+                                active_window_title=active_window_title,
+                                text_content=text_content,
+                                sent=False,
+                                scene=current_scene,
+                                note=window_limit_reason,
+                            )
+                            analysis_trace["status"] = "skipped_window_cooldown"
+                            analysis_trace["reply_preview"] = self._truncate_preview_text(
+                                text_content,
+                                limit=140,
+                            )
+                            self._remember_screen_analysis_trace(analysis_trace)
+                            continue
 
                         # 添加日记条目
-                        self._add_diary_entry(text_content, active_window_title)
+                        diary_stored = self._add_diary_entry(text_content, active_window_title)
+                        analysis_trace["stored_in_diary"] = bool(diary_stored)
 
                         # 如果处于休息提醒时间，更新冷却时间
                         if self._is_in_rest_reminder_range():
@@ -7407,16 +9401,37 @@ class ScreenCompanion(Star):
                             logger.info(
                                 f"准备发送主动消息，目标: {target}, 文本内容: {text_content}"
                             )
-                            await self._send_segmented_text(
+                            sent = await self._send_segmented_text(
                                 target,
                                 text_content,
                                 should_continue=lambda: self.is_running,
                             )
+                            self._remember_auto_reply_state(
+                                task_id,
+                                active_window_title=active_window_title,
+                                text_content=text_content,
+                                sent=sent,
+                                scene=current_scene,
+                            )
                         else:
+                            sent = False
                             if self.is_running:
-                                await self._send_proactive_message(
+                                sent = await self._send_proactive_message(
                                     target, chain
                                 )
+                            self._remember_auto_reply_state(
+                                task_id,
+                                active_window_title=active_window_title,
+                                text_content="[非纯文本回复]",
+                                sent=sent,
+                                scene=current_scene,
+                            )
+                        analysis_trace["reply_preview"] = self._truncate_preview_text(
+                            text_content or "[非纯文本回复]",
+                            limit=140,
+                        )
+                        analysis_trace["status"] = "sent" if sent else "not_sent"
+                        self._remember_screen_analysis_trace(analysis_trace)
 
                         # 尝试将消息加入到对话历史
                         try:

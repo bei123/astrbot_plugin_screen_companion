@@ -545,12 +545,20 @@ class WebServer:
             filename = f'diary_{date.replace("-", "")}.md'
             diary_path = os.path.join(self.data_dir, filename)
             content = ""
+            structured_summary: dict[str, Any] = {}
             if os.path.exists(diary_path):
                 with open(diary_path, 'r', encoding='utf-8') as f:
                     content = f.read()
+            try:
+                target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            except Exception:
+                target_date = None
+            if target_date and hasattr(self.plugin, "_load_diary_structured_summary"):
+                structured_summary = self.plugin._load_diary_structured_summary(target_date) or {}
             return self._ok({
                 'date': date,
-                'content': content
+                'content': content,
+                'structured_summary': structured_summary,
             })
         except Exception as e:
             logger.error(f"Error getting diary: {e}")
@@ -741,6 +749,15 @@ class WebServer:
                     "active_window": active_window,
                     "content": content,
                     "time_period": time_period,
+                    "trigger_reason": str(obs.get("trigger_reason", "") or "").strip(),
+                    "material_kind": str(obs.get("material_kind", "") or "").strip(),
+                    "analysis_material_kind": str(obs.get("analysis_material_kind", "") or "").strip(),
+                    "sampling_strategy": str(obs.get("sampling_strategy", "") or "").strip(),
+                    "recognition_summary": str(obs.get("recognition_summary", "") or "").strip(),
+                    "reply_preview": str(obs.get("reply_preview", "") or "").strip(),
+                    "frame_count": int(obs.get("frame_count", 0) or 0),
+                    "frame_labels": list(obs.get("frame_labels", []) or []),
+                    "used_full_video": bool(obs.get("used_full_video", False)),
                 }
             )
 
@@ -776,7 +793,7 @@ class WebServer:
                     "category": "scenes",
                     "category_label": "高频场景",
                     "title": scene_name,
-                    "summary": f"出现 {int(data.get('count', 0) or 0)} 次",
+                    "summary": f"出现 {int(data.get('usage_count', data.get('count', 0)) or 0)} 次",
                     "meta": f"最近出现: {data.get('last_used', '未知')}",
                     "priority": data.get("priority", 0),
                     "last_date": data.get("last_used", ""),
@@ -839,6 +856,54 @@ class WebServer:
                 }
             )
 
+        episodic_memories = long_term_memory.get("episodic_memories", [])
+        for item in episodic_memories:
+            if not isinstance(item, dict):
+                continue
+            title = (
+                str(item.get("active_window", "") or "").strip()
+                or str(item.get("scene", "") or "").strip()
+                or "近期片段"
+            )
+            memories.append(
+                {
+                    "category": "episodes",
+                    "category_label": "情节记忆",
+                    "title": title,
+                    "summary": str(item.get("summary", "") or "").strip() or "暂无摘要",
+                    "meta": (
+                        f"最近出现: {item.get('last_seen', '未知')} | "
+                        f"累计 {int(item.get('count', 0) or 0)} 次"
+                    ),
+                    "priority": item.get("priority", 0),
+                    "last_date": item.get("last_seen", ""),
+                }
+            )
+
+        focus_patterns = long_term_memory.get("focus_patterns", {})
+        for _, item in focus_patterns.items():
+            if not isinstance(item, dict):
+                continue
+            title = (
+                str(item.get("scene", "") or "").strip()
+                or str(item.get("active_window", "") or "").strip()
+                or "重复关注点"
+            )
+            memories.append(
+                {
+                    "category": "focus_patterns",
+                    "category_label": "重复关注点",
+                    "title": title,
+                    "summary": str(item.get("summary", "") or "").strip() or "暂无摘要",
+                    "meta": (
+                        f"最近出现: {item.get('last_seen', '未知')} | "
+                        f"累计 {int(item.get('count', 0) or 0)} 次"
+                    ),
+                    "priority": item.get("priority", 0),
+                    "last_date": item.get("last_seen", ""),
+                }
+            )
+
         memories.sort(
             key=lambda item: (item.get("priority", 0), item.get("title", "")),
             reverse=True,
@@ -895,8 +960,8 @@ class WebServer:
         """Return basic config metadata."""
         try:
             return self._ok({
-            "version": "2.6.2",
-            "plugin_version": "2.6.2"
+            "version": "2.7.0",
+            "plugin_version": "2.7.0"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -1220,8 +1285,8 @@ class WebServer:
             {
                 "status": "ok",
                 "service": "screen-companion-webui",
-            "version": "2.6.2",
-            "plugin_version": "2.6.2",
+            "version": "2.7.0",
+            "plugin_version": "2.7.0",
                 "host": self.host,
                 "port": self.port,
                 "auth_enabled": bool(self._get_expected_secret()),
@@ -1249,6 +1314,9 @@ class WebServer:
 
         latest_screenshot = self._build_latest_media_info("image")
         latest_video = self._build_latest_media_info("video")
+        recent_screen_analyses = []
+        if hasattr(self.plugin, "_get_recent_screen_analysis_traces"):
+            recent_screen_analyses = self.plugin._get_recent_screen_analysis_traces(limit=6) or []
 
         return {
             "enabled": self._plugin_bool("enabled"),
@@ -1271,6 +1339,7 @@ class WebServer:
             "debug": self._plugin_bool("debug"),
             "save_local": self._plugin_bool("save_local"),
             "screen_recognition_mode": bool(self.plugin._use_screen_recording_mode()),
+            "recording_video_encoder": getattr(self.plugin, "_get_recording_video_encoder", lambda: "")() or "",
             "use_external_vision": self._plugin_bool("use_external_vision"),
             "use_shared_screenshot_dir": self._plugin_bool("use_shared_screenshot_dir"),
             "shared_screenshot_dir": getattr(self.plugin, "shared_screenshot_dir", "") or "",
@@ -1283,6 +1352,7 @@ class WebServer:
             "observation_count": len(getattr(self.plugin, "observations", []) or []),
             "latest_screenshot": latest_screenshot,
             "latest_video": latest_video,
+            "recent_screen_analyses": recent_screen_analyses,
             "presets": presets,
         }
 
@@ -1353,7 +1423,10 @@ class WebServer:
 
     def _build_activity_stats(self, activity_history: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if activity_history is None:
-            activity_history = getattr(self.plugin, "activity_history", []) or []
+            if hasattr(self.plugin, "_get_activity_history_for_stats"):
+                activity_history = self.plugin._get_activity_history_for_stats() or []
+            else:
+                activity_history = getattr(self.plugin, "activity_history", []) or []
         today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
 
         today_work_time = 0

@@ -428,6 +428,31 @@ function renderRuntimeInsights(runtime) {
         `;
         elements.runtimeInsights.appendChild(card);
     });
+
+    const recentAnalyses = Array.isArray(runtime.recent_screen_analyses) ? runtime.recent_screen_analyses : [];
+    recentAnalyses.slice(0, 3).forEach((trace) => {
+        const card = document.createElement("article");
+        card.className = "helper-card";
+        const meta = [
+            trace.trigger_reason ? `触发：${trace.trigger_reason}` : "",
+            trace.analysis_material_kind ? `识别素材：${trace.analysis_material_kind}` : "",
+            trace.sampling_strategy ? `采样：${trace.sampling_strategy}` : "",
+            trace.scene ? `场景：${trace.scene}` : "",
+            trace.status ? `状态：${trace.status}` : "",
+        ].filter(Boolean);
+        const summary = [
+            trace.recognition_summary ? `识别摘要：${trace.recognition_summary}` : "",
+            trace.reply_preview ? `最终回复：${trace.reply_preview}` : "",
+            trace.stored_as_observation ? "已写入观察" : "未写入观察",
+            trace.stored_in_diary ? "已进入日记候选" : "未进入日记候选",
+        ].filter(Boolean);
+        card.innerHTML = `
+            <strong>最近一次识屏解释</strong>
+            <p>${escapeHtml(meta.join(" / ") || "暂无识屏解释信息。")}</p>
+            <p>${escapeHtml(summary.join(" | "))}</p>
+        `;
+        elements.runtimeInsights.appendChild(card);
+    });
 }
 
 function renderRuntimeMedia(runtime) {
@@ -937,12 +962,94 @@ function renderDiaryList() {
     });
 }
 
-function renderDiaryDetail(date, content) {
+function buildDiarySummaryText(summary) {
+    if (!summary || typeof summary !== "object") {
+        return state.diaryDates.length ? `共 ${state.diaryDates.length} 篇日记，默认打开最近日期。` : "还没有生成任何日记。";
+    }
+
+    const mainWindowCount = Array.isArray(summary.main_windows) ? summary.main_windows.length : 0;
+    const repeatedFocusCount = Array.isArray(summary.repeated_focuses) ? summary.repeated_focuses.length : 0;
+    const suggestionCount = Array.isArray(summary.suggestion_items) ? summary.suggestion_items.length : 0;
+    const parts = [`共 ${state.diaryDates.length} 篇日记`];
+    if (mainWindowCount) parts.push(`主要窗口 ${mainWindowCount} 项`);
+    if (repeatedFocusCount) parts.push(`重复卡点 ${repeatedFocusCount} 项`);
+    if (suggestionCount) parts.push(`建议 ${suggestionCount} 项`);
+    return parts.join("，");
+}
+
+function renderDiaryStructuredSummary(summary) {
+    if (!summary || typeof summary !== "object") return "";
+
+    const blocks = [];
+    const mainWindows = Array.isArray(summary.main_windows) ? summary.main_windows : [];
+    if (mainWindows.length) {
+        blocks.push(`
+            <div>
+                <strong>今日主要窗口</strong>
+                <p>${escapeHtml(mainWindows.slice(0, 3).map((item) => `${item.window_title || "当前窗口"}（约 ${item.duration_minutes || 0} 分钟）`).join("、"))}</p>
+            </div>
+        `);
+    }
+
+    const longestTask = summary.longest_task && typeof summary.longest_task === "object" ? summary.longest_task : null;
+    if (longestTask?.window_title) {
+        blocks.push(`
+            <div>
+                <strong>最长停留任务</strong>
+                <p>${escapeHtml(`${longestTask.window_title}（约 ${longestTask.duration_minutes || 0} 分钟）${longestTask.focus ? `，主要在：${longestTask.focus}` : ""}`)}</p>
+            </div>
+        `);
+    }
+
+    const repeatedFocuses = Array.isArray(summary.repeated_focuses) ? summary.repeated_focuses : [];
+    if (repeatedFocuses.length) {
+        blocks.push(`
+            <div>
+                <strong>重复卡点</strong>
+                <p>${escapeHtml(repeatedFocuses.slice(0, 3).map((item) => `${item.window_title || "当前窗口"}：${item.note || "重复出现"}`).join("；"))}</p>
+            </div>
+        `);
+    }
+
+    const suggestionItems = Array.isArray(summary.suggestion_items) ? summary.suggestion_items : [];
+    if (suggestionItems.length) {
+        blocks.push(`
+            <div>
+                <strong>建议事项</strong>
+                <ul>${suggestionItems.slice(0, 3).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
+            </div>
+        `);
+    }
+
+    if (!blocks.length) return "";
+    return `<section class="helper-card"><strong>今日概览</strong>${blocks.join("")}</section>`;
+}
+
+function buildObservationExplainability(observation) {
+    const detailLines = [
+        observation.trigger_reason ? `触发原因：${observation.trigger_reason}` : "",
+        observation.material_kind ? `原始素材：${observation.material_kind}` : "",
+        observation.analysis_material_kind ? `识别素材：${observation.analysis_material_kind}` : "",
+        observation.sampling_strategy ? `采样策略：${observation.sampling_strategy}` : "",
+        observation.frame_count ? `采样帧数：${observation.frame_count}` : "",
+        Array.isArray(observation.frame_labels) && observation.frame_labels.length ? `关键帧：${observation.frame_labels.join("、")}` : "",
+        typeof observation.used_full_video === "boolean" && observation.material_kind === "video"
+            ? `全量视频复判：${observation.used_full_video ? "是" : "否"}`
+            : "",
+        observation.recognition_summary ? `识别摘要：${observation.recognition_summary}` : "",
+        observation.reply_preview ? `最终回复：${observation.reply_preview}` : "",
+    ].filter(Boolean);
+    if (!detailLines.length) return "";
+    return `<div class="observation-explainability">${detailLines.map((line) => `<p class="panel-subtle">${escapeHtml(line)}</p>`).join("")}</div>`;
+}
+
+function renderDiaryDetail(date, content, structuredSummary = {}) {
     state.selectedDiaryDate = date;
     elements.diaryDateInput.value = date || "";
     renderDiaryList();
     elements.diaryTitle.textContent = date ? `${formatDateLabel(date)} 的日记` : "日记内容";
     elements.diaryMeta.textContent = content ? "已加载完整内容" : "这一天还没有写入内容";
+    elements.diarySummary.textContent = buildDiarySummaryText(structuredSummary);
 
     if (!content) {
         state.diaryObservationsExpanded = false;
@@ -955,11 +1062,13 @@ function renderDiaryDetail(date, content) {
         elements.diaryReflection.appendChild(empty);
         elements.diaryObservations.innerHTML = "";
         elements.diaryObservations.appendChild(cloneEmptyState());
+        elements.diarySummary.textContent = state.diaryDates.length ? `共 ${state.diaryDates.length} 篇日记，默认打开最近日期。` : "还没有生成任何日记。";
         return;
     }
 
     const diary = splitDiaryContent(content);
-    elements.diaryReflection.innerHTML = renderDiaryMarkdown(diary.reflection || diary.full);
+    const structuredSummaryHtml = renderDiaryStructuredSummary(structuredSummary);
+    elements.diaryReflection.innerHTML = `${structuredSummaryHtml}${renderDiaryMarkdown(diary.reflection || diary.full)}`;
 
     if (diary.observation) {
         const structuredEntries = parseDiaryObservationEntries(diary.observation);
@@ -1082,6 +1191,7 @@ function renderObservationList() {
                 </label>
             </div>
             <p class="observation-content">${escapeHtml(observation.content || observation.recognition || "无内容")}</p>
+            ${buildObservationExplainability(observation)}
             <div class="observation-footer">
                 <span class="panel-subtle">索引 ${escapeHtml(observation.index)}</span>
                 <button class="danger-button" type="button">删除这条</button>
@@ -1303,7 +1413,7 @@ async function loadDiaryDetail(date) {
     renderLoading(elements.diaryReflection, "正在读取日记内容...");
     renderLoading(elements.diaryObservations, "正在整理观察记录...");
     const data = await apiFetch(`/api/diary/${date}`);
-    renderDiaryDetail(data.date, data.content || "");
+    renderDiaryDetail(data.date, data.content || "", data.structured_summary || {});
 }
 
 async function loadObservationScenes() {
@@ -1735,5 +1845,4 @@ window.addEventListener("DOMContentLoaded", async () => {
         setConnectionState("error", `初始化失败: ${error.message}`);
     }
 });
-
 
