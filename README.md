@@ -61,7 +61,8 @@ pip install -r requirements.txt
 
 ### Windows 快速配置
 
-1. 从 [Gyan FFmpeg Builds](https://www.gyan.dev/ffmpeg/builds/) 下载 `ffmpeg-release-essentials.zip`。
+0. 尝试从该插件的release中下载ffmpeg.exe。
+1. 或者从 [Gyan FFmpeg Builds](https://www.gyan.dev/ffmpeg/builds/) 下载 `ffmpeg-release-essentials.zip`。
 2. 解压后找到 `ffmpeg.exe`，通常位于 `bin\ffmpeg.exe`。
 3. 在 AstrBot 中执行：
 
