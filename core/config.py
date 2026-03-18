@@ -95,7 +95,7 @@ class PluginConfig(BaseModel):
     debug: bool = False
     # === 额外配置 ===
     observation_storage: str = ""
-    max_observations: int = 9
+    max_observations: int = 40
     interaction_frequency: int = 5
     image_quality: int = 70
     system_prompt: str = "你需要想象自己真实地为了满足好奇心而偷偷查看了一眼用户的屏幕，然后与用户进行互动。"

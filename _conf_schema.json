@@ -107,7 +107,7 @@
   "ffmpeg_path": {
     "description": "ffmpeg 可执行文件路径",
     "type": "string",
-    "hint": "留空则自动查找。如填写，需填写 ffmpeg.exe 的绝对路径。ffmpeg 用于录屏，不下载则无法使用录屏模式。",
+    "hint": "留空则自动查找。如填写，需填写 ffmpeg.exe 的绝对路径。默认会优先查找插件数据目录下的 bin/ffmpeg.exe。ffmpeg 用于录屏，不下载则无法使用录屏模式。",
     "default": "",
     "condition": {
       "enabled": true,
@@ -517,7 +517,7 @@
   "rest_time_range": {
     "description": "用户休息时间",
     "type": "string",
-    "hint": "设定用户的休息时间范围，格式为'H:MM-HH:MM'，例如'22:00-06:00'。在这个时间段内，bot会更积极地催促用户休息。留空表示不限制休息时间。",
+    "hint": "设定用户的休息时间范围，格式为'H:MM-HH:MM'，例如'22:00-06:00'。插件会优先根据最近几天最后一次窗口活动推测休息时间，并在接近该时点时每天仅提醒一次；这里会作为推测样本不足时的兜底范围。",
     "default": "22:00-06:00",
     "condition": {
       "enabled": true

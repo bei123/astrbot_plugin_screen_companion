@@ -38,6 +38,12 @@ class ScreenCompanion(Star):
     DEFAULT_WEBUI_PORT = 6314
     SCREENSHOT_MODE = "screenshot"
     RECORDING_MODE = "recording"
+    REST_ACTIVITY_WINDOW_START_HOUR = 20
+    REST_REMINDER_CUTOFF_HOUR = 4
+    REST_REMINDER_ADVANCE_MINUTES = 20
+    REST_REMINDER_LATEST_AFTER_MINUTES = 30
+    REST_INFERENCE_LOOKBACK_DAYS = 10
+    REST_INFERENCE_MIN_SAMPLES = 1
     RECORDING_FPS = 1.0
     RECORDING_DURATION_SECONDS = 10
     CHANGE_AWARE_IDLE_KEEPALIVE_SECONDS = 15 * 60
@@ -47,6 +53,7 @@ class ScreenCompanion(Star):
     WORK_WINDOW_MESSAGE_COOLDOWN_SECONDS = 150
     GENERAL_WINDOW_MESSAGE_COOLDOWN_SECONDS = 240
     ENTERTAINMENT_WINDOW_MESSAGE_COOLDOWN_SECONDS = 360
+    REST_CUE_REPLY_COOLDOWN_SECONDS = 90 * 60
     CUSTOM_TASK_PROCESS_DEDUP_SECONDS = 90
     BACKGROUND_SCREEN_GUARD_STALE_SECONDS = 5 * 60
     SCREEN_ANALYSIS_FAILURE_BACKOFF_BASE_SECONDS = 30
@@ -107,6 +114,7 @@ class ScreenCompanion(Star):
         self.last_mic_trigger = 0  # 上次麦克风触发时间
         self.mic_debounce_time = 60  # 麦克风防抖时间，单位为秒
         self.last_rest_reminder_time = None  # 上次休息提醒时间，用于冷却
+        self.last_rest_reminder_day = ""
 
         self.parsed_preferences = {}
         self.learning_data = {}
@@ -175,6 +183,10 @@ class ScreenCompanion(Star):
         self.activity_history = []  # 活动历史记录
         self.activity_history_file = os.path.join(self.learning_storage, "activity_history.json")
         self._load_activity_history()
+        self.rest_reminder_state_file = os.path.join(
+            self.learning_storage, "rest_reminder_state.json"
+        )
+        self._load_rest_reminder_state()
 
         self.uncertainty_words = ["也许", "可能", "看起来", "我猜", "像是", "大概", "说不定", "似乎"]
 
@@ -1218,6 +1230,15 @@ class ScreenCompanion(Star):
             self.window_companion_active_target = ""
         if not hasattr(self, "window_companion_active_rule") or self.window_companion_active_rule is None:
             self.window_companion_active_rule = {}
+        if not hasattr(self, "last_rest_reminder_time"):
+            self.last_rest_reminder_time = None
+        if not hasattr(self, "last_rest_reminder_day"):
+            self.last_rest_reminder_day = ""
+        if not hasattr(self, "rest_reminder_state_file"):
+            self.rest_reminder_state_file = os.path.join(
+                self.learning_storage,
+                "rest_reminder_state.json",
+            )
         self._ensure_recording_runtime_state()
 
     def _ensure_recording_runtime_state(self) -> None:
@@ -1365,9 +1386,12 @@ class ScreenCompanion(Star):
         if configured_path:
             candidate_paths.append(configured_path)
 
+        data_ffmpeg_dir = self._get_ffmpeg_storage_dir()
         plugin_dir = os.path.dirname(os.path.abspath(__file__))
         candidate_paths.extend(
             [
+                os.path.join(data_ffmpeg_dir, "ffmpeg.exe"),
+                os.path.join(data_ffmpeg_dir, "ffmpeg"),
                 os.path.join(plugin_dir, "bin", "ffmpeg.exe"),
                 os.path.join(plugin_dir, "bin", "ffmpeg"),
                 os.path.join(plugin_dir, "ffmpeg.exe"),
@@ -1384,6 +1408,16 @@ class ScreenCompanion(Star):
         ffmpeg_path = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe") or ""
         self._recording_ffmpeg_path = ffmpeg_path or None
         return ffmpeg_path
+
+    def _get_ffmpeg_storage_dir(self, create: bool = False) -> str:
+        data_dir = str(getattr(self.plugin_config, "data_dir", "") or "").strip()
+        if data_dir:
+            ffmpeg_dir = os.path.join(data_dir, "bin")
+        else:
+            ffmpeg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+        if create:
+            os.makedirs(ffmpeg_dir, exist_ok=True)
+        return ffmpeg_dir
 
     def _get_recording_video_encoder(self) -> str:
         self._ensure_recording_runtime_state()
@@ -1522,6 +1556,7 @@ class ScreenCompanion(Star):
         *,
         sample_count: int = 3,
         sampling_strategy: str = "keyframe_sheet",
+        latest_frame_bytes: bytes | None = None,
     ) -> dict[str, Any] | None:
         ffmpeg_path = self._get_ffmpeg_path()
         if not ffmpeg_path or not video_bytes:
@@ -1580,6 +1615,15 @@ class ScreenCompanion(Star):
                     label = frame_labels[min(index, len(frame_labels) - 1)]
                     frames.append((label, frame.copy()))
 
+            has_live_anchor_frame = False
+            if latest_frame_bytes:
+                try:
+                    with Image.open(io.BytesIO(latest_frame_bytes)) as latest_image:
+                        frames.append(("现在", latest_image.convert("RGB").copy()))
+                        has_live_anchor_frame = True
+                except Exception:
+                    has_live_anchor_frame = False
+
             if not frames:
                 return None
 
@@ -1632,6 +1676,7 @@ class ScreenCompanion(Star):
                 "frame_count": len(resized_frames),
                 "frame_labels": [label for label, _ in resized_frames],
                 "sampling_strategy": sampling_strategy,
+                "has_live_anchor_frame": has_live_anchor_frame,
             }
 
     async def _build_video_sample_capture_context(
@@ -1657,6 +1702,7 @@ class ScreenCompanion(Star):
             sampling_strategy=str(
                 sampling_plan.get("sampling_strategy", "keyframe_sheet") or "keyframe_sheet"
             ),
+            latest_frame_bytes=capture_context.get("latest_image_bytes", b"") or None,
         )
         if not sample_sheet:
             return None
@@ -1670,6 +1716,7 @@ class ScreenCompanion(Star):
             "sampling_strategy": sample_sheet.get("sampling_strategy", "keyframe_sheet"),
             "frame_count": sample_sheet.get("frame_count", 0),
             "frame_labels": sample_sheet.get("frame_labels", []),
+            "has_live_anchor_frame": bool(sample_sheet.get("has_live_anchor_frame")),
             "duration_seconds": duration_seconds,
             "original_media_kind": "video",
         }
@@ -1679,7 +1726,10 @@ class ScreenCompanion(Star):
         scene: str,
         *,
         use_external_vision: bool,
+        preserve_full_video_for_audio: bool = False,
     ) -> bool:
+        if preserve_full_video_for_audio:
+            return False
         profile = self._get_scene_behavior_profile(scene)
         if use_external_vision:
             return True
@@ -1858,7 +1908,7 @@ class ScreenCompanion(Star):
         ffmpeg_path = self._get_ffmpeg_path()
         if not ffmpeg_path:
             raise RuntimeError(
-                "未找到 ffmpeg，请将 ffmpeg.exe 放到插件目录下的 bin 文件夹，"
+                "未找到 ffmpeg，请将 ffmpeg.exe 放到插件数据目录下的 bin 文件夹，"
                 "或在配置中填写 ffmpeg_path，或加入 PATH。"
             )
         if sys.platform != "win32":
@@ -1923,6 +1973,7 @@ class ScreenCompanion(Star):
         process = getattr(self, "_screen_recording_process", None)
         output_path = str(getattr(self, "_screen_recording_path", "") or "")
         self._screen_recording_process = None
+        self._screen_recording_path = ""
 
         if process and process.poll() is None:
             try:
@@ -2995,6 +3046,136 @@ class ScreenCompanion(Star):
 
         return lines
 
+    def _build_diary_reflection_fallback(
+        self,
+        observation_text: str,
+        structured_summary: dict[str, Any] | None = None,
+    ) -> str:
+        structured_summary = structured_summary or {}
+
+        def _clean_text(value: str, limit: int = 90) -> str:
+            import re
+
+            text = str(value or "").strip()
+            if not text:
+                return ""
+            text = re.sub(r"^[-*#\s]+", "", text)
+            text = re.sub(r"\s+", " ", text).strip(" .。!！?？,，:：;；")
+            return text[:limit]
+
+        paragraphs: list[str] = []
+        main_windows = structured_summary.get("main_windows", []) or []
+        longest_task = structured_summary.get("longest_task", {}) or {}
+        repeated_focuses = structured_summary.get("repeated_focuses", []) or []
+        suggestion_items = structured_summary.get("suggestion_items", []) or []
+
+        if main_windows:
+            window_text = "、".join(
+                f"《{item.get('window_title') or '当前窗口'}》"
+                for item in main_windows[:2]
+            )
+            paragraphs.append(
+                f"今天主要在 {window_text} 之间切换，注意力基本都围着这些任务在转。"
+            )
+
+        if longest_task.get("window_title"):
+            duration = int(longest_task.get("duration_minutes", 0) or 0)
+            focus_text = _clean_text(longest_task.get("focus", ""))
+            detail = f"今天停留最久的是《{longest_task.get('window_title')}》"
+            if duration > 0:
+                detail += f"，大约花了 {duration} 分钟"
+            if focus_text:
+                detail += f"，主要在处理：{focus_text}"
+            paragraphs.append(detail + "。")
+
+        if repeated_focuses:
+            focus_text = "；".join(
+                f"《{item.get('window_title') or '当前窗口'}》里的 {_clean_text(item.get('note', ''), limit=50) or '同类问题'}"
+                for item in repeated_focuses[:2]
+            )
+            paragraphs.append(f"反复出现的卡点也比较明显，主要集中在 {focus_text}。")
+
+        if suggestion_items:
+            suggestion_text = "；".join(_clean_text(item, limit=60) for item in suggestion_items[:2] if _clean_text(item, limit=60))
+            if suggestion_text:
+                paragraphs.append(f"如果明天继续推进，比较值得优先处理的是：{suggestion_text}。")
+
+        if not paragraphs:
+            first_observation = ""
+            for raw_line in str(observation_text or "").splitlines():
+                cleaned = _clean_text(raw_line, limit=80)
+                if cleaned:
+                    first_observation = cleaned
+                    break
+            if first_observation:
+                paragraphs.append(
+                    f"今天留下的观察虽然不算多，但能看出来主要都围绕“{first_observation}”这一类事情在推进。"
+                )
+            else:
+                paragraphs.append(
+                    "今天留下来的记录比较零散，暂时还拼不出特别完整的长篇感想，但能感觉到用户一直在认真推进手头的事。"
+                )
+
+        if len(paragraphs) == 1:
+            paragraphs.append("先把最明显的脉络记下来，至少明天回看时还能迅速接上今天的节奏。")
+
+        return "\n\n".join(paragraphs[:3]).strip()
+
+    def _ensure_diary_reflection_text(
+        self,
+        reflection_text: str,
+        observation_text: str,
+        structured_summary: dict[str, Any] | None = None,
+    ) -> str:
+        cleaned = self._sanitize_diary_section_text(reflection_text)
+        if cleaned:
+            return cleaned
+        return self._build_diary_reflection_fallback(
+            observation_text=observation_text,
+            structured_summary=structured_summary,
+        )
+
+    def _extract_diary_preview_text(self, diary_content: str) -> str:
+        import re
+
+        text = str(diary_content or "").replace("\r\n", "\n").strip()
+        if not text:
+            return ""
+
+        section_patterns = [
+            r"##\s*今日感想\s*([\s\S]*?)(?=\n##\s*[^\n]+|$)",
+            r"##\s*[^ \n]*总结\s*([\s\S]*?)(?=\n##\s*[^\n]+|$)",
+            r"##\s*今日观察\s*([\s\S]*?)(?=\n##\s*[^\n]+|$)",
+        ]
+        for pattern in section_patterns:
+            match = re.search(pattern, text)
+            if not match:
+                continue
+            section_text = self._sanitize_diary_section_text(match.group(1))
+            if section_text:
+                return section_text[:500]
+
+        lines = []
+        skip_patterns = [
+            re.compile(r"^\s*#\s*.+日记\s*$"),
+            re.compile(r"^\s*##\s*\d{4}年\d{1,2}月\d{1,2}日.*$"),
+            re.compile(r"^\s*\*\*天气\*\*:\s*.*$"),
+            re.compile(r"^\s*##\s*今日概览\s*$"),
+            re.compile(r"^\s*##\s*今日观察\s*$"),
+            re.compile(r"^\s*##\s*今日感想\s*$"),
+        ]
+        for raw_line in text.split("\n"):
+            line = raw_line.strip()
+            if not line:
+                if lines and lines[-1] != "":
+                    lines.append("")
+                continue
+            if any(pattern.match(line) for pattern in skip_patterns):
+                continue
+            lines.append(raw_line)
+
+        return "\n".join(lines).strip()[:500]
+
     def _get_diary_summary_path(self, target_date: datetime.date) -> str:
         return os.path.join(
             self.diary_storage,
@@ -3518,6 +3699,9 @@ class ScreenCompanion(Star):
         guide += "- 优先关注用户当前正在做的事情\n"
         guide += "- 提供与场景相关的具体建议\n"
         guide += "- 保持自然的语言风格\n"
+        guide += "- 把这次回复当成上一条的延续，不要每条都重新起头\n"
+        guide += "- 不要反复使用相同称呼或相同提醒模板开场\n"
+        guide += "- 如果前面已经提醒过休息，这条默认不要重复催睡\n"
         
         if scene in ("视频", "阅读"):
             guide += "\n## 视频/阅读场景建议\n"
@@ -3534,7 +3718,8 @@ class ScreenCompanion(Star):
             guide += "\n## 对话历史参考\n"
             guide += "- 参考最近的对话内容\n"
             guide += "- 保持回应的连贯性\n"
-        
+            guide += "- 只补充新的观察、变化或下一步，不要复述上一条已经说过的话\n"
+
         return guide
 
     def _update_memory_priorities(self):
@@ -4093,6 +4278,295 @@ class ScreenCompanion(Star):
         except Exception as e:
             logger.error(f"保存活动历史失败: {e}")
 
+    def _load_rest_reminder_state(self) -> None:
+        self.last_rest_reminder_day = ""
+        self.last_rest_reminder_time = None
+        try:
+            state_file = str(getattr(self, "rest_reminder_state_file", "") or "").strip()
+            if not state_file or not os.path.exists(state_file):
+                return
+            with open(state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            self.last_rest_reminder_day = str(
+                data.get("last_rest_reminder_day", "") or ""
+            ).strip()
+            last_sent_at = str(data.get("last_rest_reminder_at", "") or "").strip()
+            if last_sent_at:
+                try:
+                    self.last_rest_reminder_time = datetime.datetime.fromisoformat(
+                        last_sent_at
+                    )
+                except Exception:
+                    self.last_rest_reminder_time = None
+        except Exception as e:
+            logger.error(f"加载休息提醒状态失败: {e}")
+            self.last_rest_reminder_day = ""
+            self.last_rest_reminder_time = None
+
+    def _save_rest_reminder_state(self) -> None:
+        try:
+            state_file = str(getattr(self, "rest_reminder_state_file", "") or "").strip()
+            if not state_file:
+                state_file = os.path.join(
+                    self.learning_storage,
+                    "rest_reminder_state.json",
+                )
+                self.rest_reminder_state_file = state_file
+            payload = {
+                "last_rest_reminder_day": str(
+                    getattr(self, "last_rest_reminder_day", "") or ""
+                ).strip(),
+                "last_rest_reminder_at": (
+                    getattr(self, "last_rest_reminder_time", None).isoformat()
+                    if isinstance(
+                        getattr(self, "last_rest_reminder_time", None),
+                        datetime.datetime,
+                    )
+                    else ""
+                ),
+            }
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存休息提醒状态失败: {e}")
+
+    def _get_rest_day_bucket(self, dt: datetime.datetime | None = None) -> datetime.date:
+        dt = dt or datetime.datetime.now()
+        if dt.hour < self.REST_REMINDER_CUTOFF_HOUR:
+            return dt.date() - datetime.timedelta(days=1)
+        return dt.date()
+
+    def _to_extended_rest_minutes(self, value: datetime.datetime | datetime.time | str) -> int | None:
+        if isinstance(value, datetime.datetime):
+            hour = int(value.hour)
+            minute = int(value.minute)
+        elif isinstance(value, datetime.time):
+            hour = int(value.hour)
+            minute = int(value.minute)
+        else:
+            parsed_minutes = self._parse_clock_to_minutes(str(value or "").strip())
+            if parsed_minutes is None:
+                return None
+            hour, minute = divmod(parsed_minutes, 60)
+        total = hour * 60 + minute
+        if total < self.REST_REMINDER_CUTOFF_HOUR * 60:
+            total += 24 * 60
+        return total
+
+    def _format_extended_rest_minutes(self, minutes_value: int | float | None) -> str:
+        if minutes_value is None:
+            return ""
+        total = int(round(float(minutes_value or 0)))
+        total %= 24 * 60
+        hour, minute = divmod(total, 60)
+        return f"{hour:02d}:{minute:02d}"
+
+    def _get_configured_rest_range(self) -> tuple[int, int] | None:
+        time_range = str(getattr(self, "rest_time_range", "") or "").strip()
+        if not time_range or "-" not in time_range:
+            return None
+        try:
+            start_text, end_text = time_range.split("-", 1)
+            start_minutes = self._parse_clock_to_minutes(start_text)
+            end_minutes = self._parse_clock_to_minutes(end_text)
+            if start_minutes is None or end_minutes is None:
+                return None
+            return start_minutes, end_minutes
+        except Exception:
+            return None
+
+    def _collect_recent_rest_activity_samples(
+        self,
+        *,
+        lookback_days: int | None = None,
+        now: datetime.datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        now = now or datetime.datetime.now()
+        current_bucket = self._get_rest_day_bucket(now)
+        lookback = max(1, int(lookback_days or self.REST_INFERENCE_LOOKBACK_DAYS))
+        earliest_bucket = current_bucket - datetime.timedelta(days=lookback)
+        nightly_start_minutes = self.REST_ACTIVITY_WINDOW_START_HOUR * 60
+        nightly_end_minutes = (24 + self.REST_REMINDER_CUTOFF_HOUR) * 60
+
+        daily_samples: dict[str, dict[str, Any]] = {}
+        for item in self._get_activity_history_for_stats():
+            if not isinstance(item, dict):
+                continue
+            for field_name in ("start_time", "end_time"):
+                ts = float(item.get(field_name, 0) or 0)
+                if ts <= 0:
+                    continue
+                dt = datetime.datetime.fromtimestamp(ts)
+                bucket_day = self._get_rest_day_bucket(dt)
+                if bucket_day >= current_bucket or bucket_day < earliest_bucket:
+                    continue
+                extended_minutes = self._to_extended_rest_minutes(dt)
+                if extended_minutes is None:
+                    continue
+                if (
+                    extended_minutes < nightly_start_minutes
+                    or extended_minutes > nightly_end_minutes
+                ):
+                    continue
+                key = bucket_day.isoformat()
+                previous = daily_samples.get(key)
+                if previous is None or ts > float(previous.get("timestamp", 0) or 0):
+                    daily_samples[key] = {
+                        "day": key,
+                        "timestamp": ts,
+                        "extended_minutes": extended_minutes,
+                        "window": self._normalize_window_title(item.get("window", "") or ""),
+                        "scene": self._normalize_scene_label(item.get("scene", "") or ""),
+                    }
+
+        return [
+            daily_samples[key]
+            for key in sorted(daily_samples.keys())
+        ]
+
+    def _infer_rest_behavior(self, now: datetime.datetime | None = None) -> dict[str, Any]:
+        now = now or datetime.datetime.now()
+        current_bucket = self._get_rest_day_bucket(now)
+        samples = self._collect_recent_rest_activity_samples(now=now)
+        info: dict[str, Any] = {
+            "available": False,
+            "source": "none",
+            "rest_extended_minutes": None,
+            "rest_clock": "",
+            "reminder_extended_minutes": None,
+            "reminder_clock": "",
+            "sample_count": len(samples),
+            "rest_bucket_day": current_bucket.isoformat(),
+        }
+
+        if len(samples) >= self.REST_INFERENCE_MIN_SAMPLES:
+            import statistics
+
+            recent_samples = samples[-self.REST_INFERENCE_LOOKBACK_DAYS :]
+            inferred_rest_minutes = int(
+                round(
+                    statistics.median(
+                        sample.get("extended_minutes", 0) for sample in recent_samples
+                    )
+                )
+            )
+            inferred_rest_minutes = max(
+                self.REST_ACTIVITY_WINDOW_START_HOUR * 60,
+                min(
+                    inferred_rest_minutes,
+                    (24 + self.REST_REMINDER_CUTOFF_HOUR) * 60,
+                ),
+            )
+            reminder_minutes = max(
+                self.REST_ACTIVITY_WINDOW_START_HOUR * 60,
+                inferred_rest_minutes - self.REST_REMINDER_ADVANCE_MINUTES,
+            )
+            info.update(
+                {
+                    "available": True,
+                    "source": "activity_history",
+                    "samples": recent_samples,
+                    "rest_extended_minutes": inferred_rest_minutes,
+                    "rest_clock": self._format_extended_rest_minutes(
+                        inferred_rest_minutes
+                    ),
+                    "reminder_extended_minutes": reminder_minutes,
+                    "reminder_clock": self._format_extended_rest_minutes(
+                        reminder_minutes
+                    ),
+                }
+            )
+            return info
+
+        configured_range = self._get_configured_rest_range()
+        if configured_range is None:
+            return info
+
+        start_minutes, _ = configured_range
+        reminder_minutes = max(
+            0,
+            start_minutes - self.REST_REMINDER_ADVANCE_MINUTES,
+        )
+        info.update(
+            {
+                "available": True,
+                "source": "configured_rest_range",
+                "rest_extended_minutes": self._to_extended_rest_minutes(
+                    datetime.time(start_minutes // 60, start_minutes % 60)
+                ),
+                "rest_clock": self._format_extended_rest_minutes(start_minutes),
+                "reminder_extended_minutes": self._to_extended_rest_minutes(
+                    datetime.time(reminder_minutes // 60, reminder_minutes % 60)
+                ),
+                "reminder_clock": self._format_extended_rest_minutes(reminder_minutes),
+            }
+        )
+        return info
+
+    def _should_send_rest_reminder(self, now: datetime.datetime | None = None) -> tuple[bool, dict[str, Any]]:
+        now = now or datetime.datetime.now()
+        info = self._infer_rest_behavior(now=now)
+        if not info.get("available"):
+            return False, info
+
+        current_bucket = self._get_rest_day_bucket(now).isoformat()
+        info["rest_bucket_day"] = current_bucket
+        if str(getattr(self, "last_rest_reminder_day", "") or "").strip() == current_bucket:
+            return False, info
+
+        reminder_minutes = info.get("reminder_extended_minutes")
+        rest_minutes = info.get("rest_extended_minutes")
+        now_minutes = self._to_extended_rest_minutes(now)
+        if reminder_minutes is None or rest_minutes is None or now_minutes is None:
+            return False, info
+        if now_minutes < reminder_minutes:
+            return False, info
+        if now_minutes > rest_minutes + self.REST_REMINDER_LATEST_AFTER_MINUTES:
+            return False, info
+        return True, info
+
+    def _remember_inferred_rest_memory(self, info: dict[str, Any]) -> bool:
+        if not isinstance(info, dict) or not info.get("available"):
+            return False
+
+        rest_clock = str(info.get("rest_clock", "") or "").strip()
+        reminder_clock = str(info.get("reminder_clock", "") or "").strip()
+        source = str(info.get("source", "") or "").strip()
+        sample_count = int(info.get("sample_count", 0) or 0)
+        summary = (
+            f"用户最近的休息时间大约在 {rest_clock}，"
+            f"提醒休息更适合放在 {reminder_clock} 左右。"
+        )
+        if source == "activity_history" and sample_count > 0:
+            summary += f" 这是根据最近 {sample_count} 天最后一次窗口活动推测出来的。"
+            latest_sample = (info.get("samples", []) or [])[-1] if isinstance(info.get("samples", []), list) else {}
+            latest_window = self._normalize_window_title(latest_sample.get("window", "") or "")
+            if latest_window:
+                summary += f" 最近一次夜间收尾窗口是《{latest_window}》。"
+        elif source == "configured_rest_range":
+            summary += " 当前样本不足，先使用配置的休息时间作为兜底。"
+
+        remembered = self._remember_episodic_memory(
+            scene="休息",
+            active_window="作息规律",
+            summary=summary,
+            response_preview=summary,
+            kind="rest_pattern",
+        )
+        if remembered:
+            self._save_long_term_memory()
+        return remembered
+
+    def _mark_rest_reminder_sent(self, info: dict[str, Any] | None = None) -> None:
+        now = datetime.datetime.now()
+        self.last_rest_reminder_time = now
+        self.last_rest_reminder_day = self._get_rest_day_bucket(now).isoformat()
+        self._save_rest_reminder_state()
+        if isinstance(info, dict):
+            self._remember_inferred_rest_memory(info)
+
     def _parse_activity_marker(self, activity: str) -> tuple[str, str, str]:
         parts = str(activity or "").split(":", 2)
         activity_type = parts[0] if len(parts) > 0 else "其他"
@@ -4418,6 +4892,90 @@ class ScreenCompanion(Star):
         if sent:
             state["last_sent_at"] = time.time()
 
+    def _format_reply_interval_text(self, seconds: float) -> str:
+        total_seconds = max(0, int(seconds or 0))
+        if total_seconds < 60:
+            return f"{total_seconds}秒"
+
+        total_minutes = total_seconds // 60
+        if total_minutes < 60:
+            if total_minutes < 5 and total_seconds % 60:
+                return f"{total_minutes}分{total_seconds % 60}秒"
+            return f"{total_minutes}分钟"
+
+        total_hours = total_minutes // 60
+        remaining_minutes = total_minutes % 60
+        if total_hours < 24:
+            if total_hours < 3 and remaining_minutes:
+                return f"{total_hours}小时{remaining_minutes}分钟"
+            return f"{total_hours}小时"
+
+        total_days = total_hours // 24
+        remaining_hours = total_hours % 24
+        if total_days < 3 and remaining_hours:
+            return f"{total_days}天{remaining_hours}小时"
+        return f"{total_days}天"
+
+    def _build_reply_interval_guidance(self, task_id: str) -> tuple[str, dict[str, Any]]:
+        state = self._ensure_auto_screen_runtime_state(task_id)
+        last_sent_at = float(state.get("last_sent_at", 0.0) or 0.0)
+        if last_sent_at <= 0:
+            return (
+                "这是这段时间里较少见的一次主动靠近。可以自然一点，但仍要直接从当前画面切入，"
+                "不要假装刚才已经接过话，也不要写得像固定问候。",
+                {
+                    "bucket": "first_touch",
+                    "elapsed_seconds": 0,
+                    "elapsed_text": "",
+                },
+            )
+
+        elapsed_seconds = max(0, int(time.time() - last_sent_at))
+        elapsed_text = self._format_reply_interval_text(elapsed_seconds)
+
+        if elapsed_seconds < 3 * 60:
+            return (
+                f"距离上一次主动回复仅约 {elapsed_text}。这次更像顺着刚才的话补一句，"
+                "只点出新的变化、判断或下一步，不要重新开场，也不要重复同一句提醒。",
+                {
+                    "bucket": "immediate_followup",
+                    "elapsed_seconds": elapsed_seconds,
+                    "elapsed_text": elapsed_text,
+                },
+            )
+
+        if elapsed_seconds < 15 * 60:
+            return (
+                f"距离上一次主动回复约 {elapsed_text}。延续陪伴感即可，可以轻轻承接刚才到现在的新变化，"
+                "但不要把语气写得像重新开始一轮对话。",
+                {
+                    "bucket": "recent_followup",
+                    "elapsed_seconds": elapsed_seconds,
+                    "elapsed_text": elapsed_text,
+                },
+            )
+
+        if elapsed_seconds < 90 * 60:
+            return (
+                f"距离上一次主动回复约 {elapsed_text}。可以有一点重新跟上的感觉，"
+                "先简短点出当前变化，再给一句观察、共鸣或建议；仍然不要太正式。",
+                {
+                    "bucket": "soft_reentry",
+                    "elapsed_seconds": elapsed_seconds,
+                    "elapsed_text": elapsed_text,
+                },
+            )
+
+        return (
+            f"距离上一次主动回复约 {elapsed_text}。可以带一点隔了一阵子后重新靠近的感觉，"
+            "但仍要立刻落在当前画面，不要长篇回顾，也不要显得生硬客套。",
+            {
+                "bucket": "long_gap_reentry",
+                "elapsed_seconds": elapsed_seconds,
+                "elapsed_text": elapsed_text,
+            },
+        )
+
     def _remember_recent_user_activity(self, event: AstrMessageEvent) -> None:
         self._ensure_runtime_state()
         umo = str(getattr(event, "unified_msg_origin", "") or "").strip()
@@ -4532,6 +5090,85 @@ class ScreenCompanion(Star):
         if len(preview) <= limit:
             return preview
         return preview[: max(0, limit - 1)] + "…"
+
+    def _contains_rest_cue(self, text: str) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        keywords = (
+            "休息",
+            "睡觉",
+            "去睡",
+            "早点睡",
+            "快去睡",
+            "先睡",
+            "熬夜",
+            "别熬夜",
+            "关机睡",
+            "关机吧",
+            "凌晨",
+            "太晚了",
+        )
+        return any(keyword in normalized for keyword in keywords)
+
+    def _strip_repeated_companion_opening(self, text: str, *, has_recent_context: bool) -> str:
+        if not has_recent_context:
+            return str(text or "").strip()
+
+        import re
+
+        cleaned = str(text or "").strip()
+        cleaned = re.sub(r"^(笨蛋|傻瓜|喂|欸|哎呀|哼)[，,、\s]+", "", cleaned, count=1)
+        cleaned = re.sub(r"^(又在|还在|现在在)看", "在看", cleaned, count=1)
+        return cleaned.strip()
+
+    def _strip_rest_cue_sentences(self, text: str) -> str:
+        import re
+
+        original = str(text or "").strip()
+        if not original:
+            return ""
+
+        parts = re.split(r"(?<=[。！？!?])\s*|\n+", original)
+        kept_parts = [
+            part.strip()
+            for part in parts
+            if part.strip() and not self._contains_rest_cue(part)
+        ]
+        if not kept_parts:
+            return original
+        cleaned = " ".join(kept_parts).strip()
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        return cleaned or original
+
+    def _has_recent_rest_cue(
+        self,
+        contexts: list[str],
+        *,
+        task_id: str,
+    ) -> bool:
+        assistant_contexts = [
+            str(item or "").strip()
+            for item in (contexts or [])
+            if str(item or "").strip().startswith("助手:")
+        ]
+        recent_assistant_mentions = sum(
+            1 for item in assistant_contexts[-3:] if self._contains_rest_cue(item)
+        )
+        if recent_assistant_mentions > 0:
+            return True
+
+        state = self._ensure_auto_screen_runtime_state(task_id)
+        last_preview = str(state.get("last_reply_preview", "") or "").strip()
+        last_sent_at = float(state.get("last_sent_at", 0.0) or 0.0)
+        if (
+            last_preview
+            and self._contains_rest_cue(last_preview)
+            and last_sent_at > 0
+            and (time.time() - last_sent_at) < self.REST_CUE_REPLY_COOLDOWN_SECONDS
+        ):
+            return True
+        return False
 
     def _remember_screen_analysis_trace(self, trace: dict[str, Any] | None) -> None:
         if not isinstance(trace, dict):
@@ -4801,7 +5438,7 @@ class ScreenCompanion(Star):
             if missing_libs == ["ffmpeg"]:
                 return (
                     False,
-                    "缺少 ffmpeg。你可以将 ffmpeg.exe 放到插件目录下的 bin 文件夹，"
+                    "缺少 ffmpeg。你可以将 ffmpeg.exe 放到插件数据目录下的 bin 文件夹，"
                     "或在配置中填写 ffmpeg_path，或加入系统 PATH。"
                 )
             return (
@@ -4827,7 +5464,7 @@ class ScreenCompanion(Star):
             if not ffmpeg_path:
                 return (
                     False,
-                    "未检测到 ffmpeg。请将 ffmpeg.exe 放到插件目录下的 bin 文件夹，"
+                    "未检测到 ffmpeg。请将 ffmpeg.exe 放到插件数据目录下的 bin 文件夹，"
                     "或在配置中填写 ffmpeg_path，或加入系统 PATH。"
                 )
             return True, ""
@@ -5280,7 +5917,7 @@ class ScreenCompanion(Star):
 
     async def _capture_recording_context(self) -> dict[str, Any]:
         self._ensure_recording_runtime_state()
-        active_window_title, _ = await asyncio.to_thread(self._get_active_window_info)
+        clip_active_window_title, _ = await asyncio.to_thread(self._get_active_window_info)
 
         async with self._screen_recording_lock:
             current_path = str(getattr(self, "_screen_recording_path", "") or "")
@@ -5320,11 +5957,19 @@ class ScreenCompanion(Star):
             await asyncio.to_thread(self._start_screen_recording_sync)
             await asyncio.to_thread(self._cleanup_recording_cache)
 
+        latest_image_bytes, latest_window_title, active_window_title = (
+            await self._capture_latest_screen_anchor(
+                fallback_window_title=clip_active_window_title
+            )
+        )
         return {
             "media_kind": "video",
             "mime_type": "video/mp4",
             "media_bytes": video_bytes,
             "active_window_title": active_window_title,
+            "clip_active_window_title": clip_active_window_title,
+            "latest_window_title": latest_window_title,
+            "latest_image_bytes": latest_image_bytes,
             "duration_seconds": self._get_recording_duration_seconds(),
             "source_label": active_window_title or "最近一段桌面录屏",
         }
@@ -5339,11 +5984,29 @@ class ScreenCompanion(Star):
             "source_label": active_window_title,
         }
 
+    async def _capture_latest_screen_anchor(
+        self,
+        *,
+        fallback_window_title: str = "",
+    ) -> tuple[bytes, str, str]:
+        latest_image_bytes = b""
+        latest_window_title = ""
+        active_window_title = self._normalize_window_title(fallback_window_title)
+        try:
+            latest_image_bytes, latest_window_title = await self._capture_screen_bytes()
+            active_window_title = (
+                self._normalize_window_title(latest_window_title)
+                or active_window_title
+            )
+        except Exception as e:
+            logger.debug(f"录屏后补抓当前截图失败: {e}")
+        return latest_image_bytes, latest_window_title, active_window_title
+
     async def _capture_one_shot_recording_context(
         self, duration_seconds: int | None = None
     ) -> dict[str, Any]:
         self._ensure_recording_runtime_state()
-        active_window_title, _ = await asyncio.to_thread(self._get_active_window_info)
+        clip_active_window_title, _ = await asyncio.to_thread(self._get_active_window_info)
         duration = max(1, int(duration_seconds or self._get_recording_duration_seconds()))
 
         async with self._screen_recording_lock:
@@ -5367,11 +6030,20 @@ class ScreenCompanion(Star):
                 except Exception as e:
                     logger.error(f"\u4fdd\u5b58\u5355\u6b21\u5f55\u5c4f\u6587\u4ef6\u5931\u8d25: {e}")
 
+            latest_image_bytes, latest_window_title, active_window_title = (
+                await self._capture_latest_screen_anchor(
+                    fallback_window_title=clip_active_window_title
+                )
+            )
+
             return {
                 "media_kind": "video",
                 "mime_type": "video/mp4",
                 "media_bytes": video_bytes,
                 "active_window_title": active_window_title,
+                "clip_active_window_title": clip_active_window_title,
+                "latest_window_title": latest_window_title,
+                "latest_image_bytes": latest_image_bytes,
                 "duration_seconds": duration,
                 "source_label": active_window_title
                 or "\u624b\u52a8\u5f55\u5236\u7684\u6700\u8fd1 10 \u79d2\u684c\u9762\u5f55\u5c4f",
@@ -5386,6 +6058,14 @@ class ScreenCompanion(Star):
     async def _capture_recognition_context(self) -> dict[str, Any]:
         if self._use_screen_recording_mode():
             return await self._capture_recording_context()
+
+        return await self._capture_screenshot_context()
+
+    async def _capture_proactive_recognition_context(self) -> dict[str, Any]:
+        if self._use_screen_recording_mode():
+            return await self._capture_one_shot_recording_context(
+                self._get_recording_duration_seconds()
+            )
 
         return await self._capture_screenshot_context()
 
@@ -5577,6 +6257,30 @@ class ScreenCompanion(Star):
         except Exception as e:
             logger.debug(f"获取当前聊天 provider_id 失败: {e}")
         return ""
+
+    async def _supports_native_gemini_video_audio(
+        self,
+        *,
+        provider=None,
+        umo: str | None = None,
+    ) -> bool:
+        try:
+            provider_id = await self._get_current_chat_provider_id(umo=umo)
+            runtime = self._resolve_provider_runtime_info(
+                provider_id=provider_id,
+                provider=provider,
+            )
+            model_name = str(runtime.get("model", "") or "").strip()
+            api_key = str(runtime.get("api_key", "") or "").strip()
+            api_base = str(runtime.get("api_base", "") or "").strip()
+            return bool(
+                self._looks_like_gemini_model(model_name)
+                and api_key
+                and self._is_official_gemini_api_base(api_base)
+            )
+        except Exception as e:
+            logger.debug(f"判断 Gemini 原生视频能力失败: {e}")
+            return False
 
     def _resolve_provider_runtime_info(
         self,
@@ -6261,7 +6965,7 @@ class ScreenCompanion(Star):
 
         return "未知"
 
-    def _get_time_prompt(self) -> str:
+    def _get_time_prompt(self, allow_rest_hint: bool = False) -> str:
         """返回当前时间段对应的语气提示。"""
         now = datetime.datetime.now()
         hour = now.hour
@@ -6272,8 +6976,10 @@ class ScreenCompanion(Star):
             return "当前是白天，建议以自然、直接、有帮助为主。"
         elif 18 <= hour < 22:
             return "当前是晚上，语气可以更放松，但建议仍要具体。"
+        elif allow_rest_hint:
+            return "当前已较晚，尽量低打扰、少用播报式开场；如本轮已明确触发休息提醒，可以顺带轻提一次，其余内容仍以当前任务为主。"
         else:
-            return "当前已较晚，尽量低打扰，少用播报式开场。"
+            return "当前已较晚，尽量低打扰、少用播报式开场；不要仅因为时间较晚就主动催用户休息或反复劝睡。"
 
     def _get_holiday_prompt(self) -> str:
         """获取节假日提示词。"""
@@ -6362,6 +7068,7 @@ class ScreenCompanion(Star):
         *,
         active_window_title: str,
         debug_mode: bool,
+        allow_rest_hint: bool = False,
     ) -> dict[str, str]:
         scene = "未知"
         scene_prompt = ""
@@ -6379,7 +7086,7 @@ class ScreenCompanion(Star):
                     logger.debug(f"场景识别失败: {e}")
 
         try:
-            time_prompt = self._get_time_prompt()
+            time_prompt = self._get_time_prompt(allow_rest_hint=allow_rest_hint)
         except Exception as e:
             if debug_mode:
                 logger.debug(f"获取时间提示失败: {e}")
@@ -6442,7 +7149,8 @@ class ScreenCompanion(Star):
                             if msg.get("role") in {"user", "assistant"}:
                                 content = str(msg.get("content", "") or "").strip()
                                 if content:
-                                    contexts.append(content)
+                                    role = "用户" if msg.get("role") == "user" else "助手"
+                                    contexts.append(f"{role}: {content}")
             except Exception as e:
                 if debug_mode:
                     logger.debug(f"读取对话上下文失败: {e}")
@@ -6518,7 +7226,8 @@ class ScreenCompanion(Star):
         task_id: str = "unknown",
     ) -> list[BaseMessageComponent]:
         """Analyze the current screenshot or recording context and generate a reply."""
-        if self._is_in_rest_time_range():
+        should_send_rest_reminder, rest_reminder_info = self._should_send_rest_reminder()
+        if self._is_in_rest_time_range() and not (should_send_rest_reminder and not custom_prompt):
             logger.info(f"[任务 {task_id}] 当前处于休息时段，跳过识屏。")
             return []
 
@@ -6558,11 +7267,21 @@ class ScreenCompanion(Star):
             "used_full_video": media_kind == "video",
             "status": "running",
             "memory_hints": [],
+            "rest_reminder_planned": False,
         }
+        analysis_trace["latest_window_title"] = str(
+            capture_context.get("latest_window_title", "") or ""
+        )
+        analysis_trace["clip_active_window_title"] = str(
+            capture_context.get("clip_active_window_title", "") or ""
+        )
+        capture_context["_rest_reminder_planned"] = False
+        capture_context["_rest_reminder_info"] = {}
 
         analysis_context = await self._gather_screen_analysis_context(
             active_window_title=active_window_title,
             debug_mode=debug_mode,
+            allow_rest_hint=should_send_rest_reminder and not custom_prompt,
         )
         scene = analysis_context["scene"]
         scene_prompt = analysis_context["scene_prompt"]
@@ -6576,6 +7295,22 @@ class ScreenCompanion(Star):
             session,
             debug_mode=debug_mode,
         )
+        reply_interval_guidance, reply_interval_info = self._build_reply_interval_guidance(
+            task_id
+        )
+        analysis_trace["reply_interval_seconds"] = int(
+            reply_interval_info.get("elapsed_seconds", 0) or 0
+        )
+        analysis_trace["reply_interval_bucket"] = str(
+            reply_interval_info.get("bucket", "") or ""
+        )
+        preserve_full_video_for_audio = False
+        if media_kind == "video" and not effective_use_external_vision:
+            preserve_full_video_for_audio = await self._supports_native_gemini_video_audio(
+                provider=provider,
+                umo=umo,
+            )
+            analysis_trace["native_video_audio_capable"] = preserve_full_video_for_audio
 
         try:
             if debug_mode:
@@ -6610,9 +7345,13 @@ class ScreenCompanion(Star):
                     analysis_trace["frame_labels"] = list(
                         sampled_capture_context.get("frame_labels", []) or []
                     )
+                    analysis_trace["has_live_anchor_frame"] = bool(
+                        sampled_capture_context.get("has_live_anchor_frame")
+                    )
                     if self._should_keep_sampled_video_only(
                         scene,
                         use_external_vision=use_external_vision,
+                        preserve_full_video_for_audio=preserve_full_video_for_audio,
                     ):
                         effective_capture_context = sampled_capture_context
                         effective_media_kind = str(
@@ -6690,6 +7429,11 @@ class ScreenCompanion(Star):
 
             if contexts:
                 prompt_parts.append("最近对话：\n" + "\n".join(contexts))
+                prompt_parts.append(
+                    "连续性要求：把这条消息视作同一段持续陪伴的延续，优先补充新的变化、判断或下一步；"
+                    "不要每条都重新用情绪化称呼开场，也不要重复上一条已经说过的提醒。"
+                )
+            prompt_parts.append(f"回复节奏：{reply_interval_guidance}")
 
             related_memories = self._trigger_related_memories(scene, active_window_title)
             analysis_trace["memory_hints"] = related_memories[:4]
@@ -6734,10 +7478,19 @@ class ScreenCompanion(Star):
 
             prompt_parts.append(f"语气控制：{sampling_profile['tone_instruction']}")
 
-            if self._is_in_rest_reminder_range():
+            if not should_send_rest_reminder:
                 prompt_parts.append(
-                    "如果用户看起来已经持续工作较久，可以顺带轻提醒对方休息一下，但不要打断当前任务。"
+                    "如果最近几条消息已经提过休息、熬夜或睡觉，这次不要再重复这些提醒。"
                 )
+
+            if should_send_rest_reminder and not custom_prompt:
+                prompt_parts.append(
+                    "用户快到平时休息的时间了。请只在这次回复里顺带轻提醒一次休息，"
+                    "语气要自然、克制、不要说教，也不要打断当前任务。"
+                )
+                analysis_trace["rest_reminder_planned"] = True
+                capture_context["_rest_reminder_planned"] = True
+                capture_context["_rest_reminder_info"] = dict(rest_reminder_info or {})
 
             prompt_parts.append(
                 self._build_companion_response_guide(
@@ -6759,6 +7512,39 @@ class ScreenCompanion(Star):
                 prompt_parts.append("建议尽量收束成 1 到 2 个具体判断或下一步。")
             else:
                 prompt_parts.append("回复尽量简短、具体、贴近当前任务。")
+
+            latest_window_title = self._normalize_window_title(
+                capture_context.get("latest_window_title", "")
+            )
+            clip_window_title = self._normalize_window_title(
+                capture_context.get("clip_active_window_title", "")
+            )
+            if media_kind == "video" and latest_window_title:
+                if (
+                    clip_window_title
+                    and latest_window_title.casefold() != clip_window_title.casefold()
+                ):
+                    prompt_parts.append(
+                        f"时序补充：这段录屏对应的是刚刚过去的一小段画面，"
+                        f"更接近当前时刻的活动窗口是《{latest_window_title}》。"
+                        "如果录屏尾段和此刻状态略有错位，请优先按更接近当前的线索理解用户现在在做什么。"
+                    )
+                elif analysis_trace.get("has_live_anchor_frame"):
+                    prompt_parts.append(
+                        "时序补充：关键帧拼图最后一张标注为“现在”，是触发分析时刚补抓的当前画面。"
+                        "判断用户此刻状态时，请优先参考这张最新画面，再结合前面的录屏变化。"
+                    )
+
+            if media_kind == "video":
+                if effective_media_kind == "video":
+                    prompt_parts.append(
+                        "补充要求：如果视频里有可辨识的系统音频、提示音、语音或音乐，也请结合音频一起判断当前进展。"
+                        "如果没有听清、音轨不明显，或模型当前无法可靠利用音频，请直接说明不确定，不要编造音频内容。"
+                    )
+                else:
+                    prompt_parts.append(
+                        "补充要求：当前收到的是录屏关键帧拼图，只能依据画面判断，请不要假设视频中的音频内容。"
+                    )
 
             interaction_prompt = "\n\n".join(part for part in prompt_parts if part)
 
@@ -6822,7 +7608,13 @@ class ScreenCompanion(Star):
                 )
 
             self._update_activity(scene, active_window_title)
-            response_text = self._polish_response_text(response_text, scene)
+            response_text = self._polish_response_text(
+                response_text,
+                scene,
+                contexts=contexts,
+                allow_rest_hint=bool(analysis_trace.get("rest_reminder_planned")),
+                task_id=task_id,
+            )
             analysis_trace["reply_preview"] = self._truncate_preview_text(
                 response_text,
                 limit=140,
@@ -7310,7 +8102,7 @@ class ScreenCompanion(Star):
 
     @kpi_group.command("ffmpeg")
     async def kpi_ffmpeg(self, event: AstrMessageEvent, ffmpeg_path: str = None):
-        """设置 ffmpeg 路径并自动复制到插件目录。"""
+        """设置 ffmpeg 路径并自动复制到插件数据目录。"""
         import shutil
         
         if not ffmpeg_path:
@@ -7318,19 +8110,19 @@ class ScreenCompanion(Star):
             if current_ffmpeg:
                 yield event.plain_result(f"当前 ffmpeg 路径：{current_ffmpeg}")
             else:
+                storage_dir = self._get_ffmpeg_storage_dir()
                 yield event.plain_result(
                     "未找到 ffmpeg。\n"
                     "用法: /kpi ffmpeg [ffmpeg.exe 所在路径]\n"
                     "例如: /kpi ffmpeg C:\\Users\\用户名\\Downloads\\ffmpeg\\bin\\ffmpeg.exe\n"
                     "\n"
-                    "插件会自动将 ffmpeg 复制到插件目录的 bin 文件夹。"
+                    f"插件会自动将 ffmpeg 复制到插件数据目录的 bin 文件夹：{storage_dir}"
                 )
             return
         
         source_path = os.path.abspath(os.path.expanduser(ffmpeg_path.strip()))
         
-        ffmpeg_bin_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
-        os.makedirs(ffmpeg_bin_dir, exist_ok=True)
+        ffmpeg_bin_dir = self._get_ffmpeg_storage_dir(create=True)
         
         dest_path = os.path.join(ffmpeg_bin_dir, "ffmpeg.exe")
         
@@ -7514,9 +8306,10 @@ class ScreenCompanion(Star):
                 while start_idx < len(summary_lines) and (summary_lines[start_idx].strip().startswith('#') or not summary_lines[start_idx].strip()):
                     start_idx += 1
                 summary_text = '\n'.join(summary_lines[start_idx:]).strip()
+                summary_text = self._extract_diary_preview_text(summary_text)
                 if len(summary_text) > 500:
                     summary_text = summary_text[:497] + "..."
-                diary_message = f"{self.bot_name} 的日记\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                diary_message = f"{self.bot_name} 的日记\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text or '这篇日记里还没有整理出完整感想。'}"
             else:
                 # 尝试提取旧格式的总结部分
                 summary_start = diary_content.find(f"## {self.bot_name}的总结")
@@ -7526,21 +8319,21 @@ class ScreenCompanion(Star):
                     summary_content = diary_content[summary_start:]
                     # 提取总结文本并去除标题
                     summary_lines = summary_content.split('\n')
-                    summary_text = '\n'.join(summary_lines[2:]).strip()
+                    summary_text = self._extract_diary_preview_text('\n'.join(summary_lines[2:]).strip())
                     if len(summary_text) > 500:
                         summary_text = summary_text[:497] + "..."
-                    diary_message = f"{self.bot_name} 的日记\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                    diary_message = f"{self.bot_name} 的日记\n{target_date.strftime('%Y年%m月%d日')}\n\n{summary_text or '这篇日记里还没有整理出完整感想。'}"
                 else:
                     observation_start = diary_content.find("## 今日观察")
                     if observation_start != -1:
                         observation_content = diary_content[observation_start:]
                         observation_lines = observation_content.split('\n')
-                        observation_text = '\n'.join(observation_lines[2:]).strip()
+                        observation_text = self._extract_diary_preview_text('\n'.join(observation_lines[2:]).strip())
                         if len(observation_text) > 500:
                             observation_text = observation_text[:497] + "..."
-                        diary_message = f"{self.bot_name} 的日记\n{target_date.strftime('%Y年%m月%d日')}\n\n{observation_text}"
+                        diary_message = f"{self.bot_name} 的日记\n{target_date.strftime('%Y年%m月%d日')}\n\n{observation_text or '这篇日记里还没有可展示的内容。'}"
                     else:
-                        diary_message = diary_content[:500].strip() or "这篇日记里还没有可展示的内容。"
+                        diary_message = self._extract_diary_preview_text(diary_content) or "这篇日记里还没有可展示的内容。"
 
             if self.diary_auto_recall:
                 logger.info(f"日记消息将在 {self.diary_recall_time} 秒后自动撤回")
@@ -7705,10 +8498,10 @@ class ScreenCompanion(Star):
                 summary_content = diary['content'][summary_start:]
                 # 提取感想文本并去除标题
                 summary_lines = summary_content.split('\n')
-                summary_text = '\n'.join(summary_lines[2:]).strip()
+                summary_text = self._extract_diary_preview_text('\n'.join(summary_lines[2:]).strip())
                 if len(summary_text) > 500:
                     summary_text = summary_text[:497] + "..."
-                diary_message = f"{self.bot_name} 的日记\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                diary_message = f"{self.bot_name} 的日记\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text or '这篇日记里还没有整理出完整感想。'}"
             else:
                 # 尝试提取旧格式的总结部分
                 summary_start = diary['content'].find(f"## {self.bot_name}的总结")
@@ -7718,16 +8511,16 @@ class ScreenCompanion(Star):
                     summary_content = diary['content'][summary_start:]
                     # 提取总结文本并去除标题
                     summary_lines = summary_content.split('\n')
-                    summary_text = '\n'.join(summary_lines[2:]).strip()
+                    summary_text = self._extract_diary_preview_text('\n'.join(summary_lines[2:]).strip())
                     if len(summary_text) > 500:
                         summary_text = summary_text[:497] + "..."
-                    diary_message = f"{self.bot_name} 的日记\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text}"
+                    diary_message = f"{self.bot_name} 的日记\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{summary_text or '这篇日记里还没有整理出完整感想。'}"
                 else:
                     # 如果没有总结段落，则回退到整篇日记内容
-                    diary_text = diary["content"].replace(f"# {self.bot_name} 的日记", "").replace(diary["date"].strftime("%Y年%m月%d日"), "").replace("## 今日观察", "").strip()
+                    diary_text = self._extract_diary_preview_text(diary["content"])
                     if len(diary_text) > 500:
                         diary_text = diary_text[:497] + "..."
-                    diary_message = f"{self.bot_name} 的日记\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary_text}"
+                    diary_message = f"{self.bot_name} 的日记\n{diary['date'].strftime('%Y年%m月%d日')}\n\n{diary_text or '这篇日记里还没有可展示的内容。'}"
             
             send_as_image = self.diary_send_as_image
             
@@ -7950,7 +8743,10 @@ class ScreenCompanion(Star):
                     weekday=weekday,
                     weather_info=weather_info,
                     observation_text=observation_text,
-                    reflection_text=response.completion_text,
+                    reflection_text=self._ensure_diary_reflection_text(
+                        response.completion_text,
+                        observation_text,
+                    ),
                 )
 
                 # 保存日记文件
@@ -7998,22 +8794,24 @@ class ScreenCompanion(Star):
 
     def _is_in_rest_time_range(self):
         """检查当前时间是否在休息时间段内。"""
-        # 使用配置中的休息时间段
-        time_range = self.rest_time_range
-
-        if not time_range:
+        configured_range = self._get_configured_rest_range()
+        if configured_range is None:
             return False
 
         try:
-            import datetime
-
             now = datetime.datetime.now().time()
-            start_str, end_str = time_range.split("-")
-            start_hour, start_minute = map(int, start_str.split(":"))
-            end_hour, end_minute = map(int, end_str.split(":"))
+            start_minutes, end_minutes = configured_range
+            inferred = self._infer_rest_behavior()
+            effective_start_minutes = start_minutes
+            inferred_rest_minutes = inferred.get("rest_extended_minutes")
+            if inferred.get("available") and inferred_rest_minutes is not None:
+                effective_start_minutes = int(inferred_rest_minutes) % (24 * 60)
 
-            start_time = datetime.time(start_hour, start_minute)
-            end_time = datetime.time(end_hour, end_minute)
+            start_time = datetime.time(
+                effective_start_minutes // 60,
+                effective_start_minutes % 60,
+            )
+            end_time = datetime.time(end_minutes // 60, end_minutes % 60)
 
             if start_time <= end_time:
                 return start_time <= now <= end_time
@@ -8025,54 +8823,10 @@ class ScreenCompanion(Star):
             return False
 
     def _is_in_rest_reminder_range(self):
-        """检查当前是否处于休息提醒区间。
-        
-        休息提醒逻辑：
-        - 只在休息时间段内提醒
-        - 以4点作为每日结束时间点，如果当前时间>=4点，则不再提醒休息
-        - 例如：休息时间为02:00-06:00，则在02:00-04:00之间提醒，04:00-06:00不提醒
-        """
-        # 使用配置中的休息时间段
-        time_range = self.rest_time_range
-
-        if not time_range:
-            return False
-
+        """检查当前是否应触发一次休息提醒。"""
         try:
-            import datetime
-
-            now = datetime.datetime.now()
-            current_hour = now.hour
-            current_minute = now.minute
-            
-            # 如果当前时间已经>=4点，则不再提醒休息（每日结束时间点）
-            if current_hour >= 4:
-                return False
-
-            now_time = now.time()
-            start_str, end_str = time_range.split("-")
-            start_hour, start_minute = map(int, start_str.split(":"))
-            end_hour, end_minute = map(int, end_str.split(":"))
-
-            start_time = datetime.time(start_hour, start_minute)
-            end_time = datetime.time(end_hour, end_minute)
-
-            # 只在休息时间内提醒，不在休息时间前提醒
-            if start_time <= end_time:
-                in_rest_time = start_time <= now_time <= end_time
-            else:
-                # 跨午夜的情况
-                in_rest_time = now_time >= start_time or now_time <= end_time
-
-            # 检查冷却时间
-            if in_rest_time:
-                last_reminder_time = getattr(self, "last_rest_reminder_time", None)
-                if last_reminder_time:
-                    time_diff = (now - last_reminder_time).total_seconds() / 60
-                    if time_diff < 30:
-                        return False
-                return True
-            return False
+            should_send, _ = self._should_send_rest_reminder()
+            return should_send
         except Exception as e:
             logger.error(f"解析休息提醒时间段失败: {e}")
             return False
@@ -8095,6 +8849,9 @@ class ScreenCompanion(Star):
             "active_window": active_window,
         }
         self.diary_entries.append(entry)
+        # 保留最多10条当天记录，避免日记生成时间在凌晨2点前时丢失数据
+        if len(self.diary_entries) > 10:
+            self.diary_entries = self.diary_entries[-10:]
         logger.info(f"添加日记条目: {entry}")
         return True
 
@@ -8121,6 +8878,46 @@ class ScreenCompanion(Star):
         compacted_entries = self._compact_diary_entries(self.diary_entries)
         if not compacted_entries:
             logger.info("今日日记没有可用的高质量观察条目，已跳过生成")
+            # 生成一篇"没观察"的日记，bot 抱怨用户没给机会
+            provider = self.context.get_using_provider()
+            if provider:
+                try:
+                    system_prompt = await self._get_persona_prompt()
+                    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+                    weekday = weekdays[target_date.weekday()]
+                    weather_info = ""
+                    try:
+                        weather_info = await self._get_weather_prompt()
+                    except Exception:
+                        pass
+                    no_observation_prompt = (
+                        "今天的日记有些特别——你发现用户今天根本没给你看屏幕的机会！\n"
+                        "请写一段带点委屈、带点撒娇的日记，抱怨用户今天忽略了你。\n"
+                        "可以假装生气、假装吃醋，但最终要表达'明天也要来看你哦'的期待。\n"
+                        "字数控制在 150-280 字，自然俏皮一点。\n"
+                    )
+                    response = await provider.text_chat(
+                        prompt=no_observation_prompt, system_prompt=system_prompt
+                    )
+                    if response and hasattr(response, "completion_text") and response.completion_text:
+                        reflection_text = self._ensure_diary_reflection_text(
+                            response.completion_text,
+                            "（今天用户没给我看屏幕的机会，呜呜）",
+                        )
+                        diary_content = self._build_diary_document(
+                            target_date=target_date,
+                            weekday=weekday,
+                            weather_info=weather_info,
+                            observation_text="（今天用户没给我看屏幕的机会，呜呜）",
+                            reflection_text=reflection_text,
+                        )
+                        diary_filename = f"diary_{target_date.strftime('%Y%m%d')}.md"
+                        diary_path = os.path.join(self.diary_storage, diary_filename)
+                        with open(diary_path, "w", encoding="utf-8") as f:
+                            f.write(diary_content)
+                        logger.info(f"日记已保存（无观察）: {diary_path}")
+                except Exception as e:
+                    logger.error(f"生成无观察日记失败: {e}")
             self.diary_entries = []
             self.last_diary_date = target_date
             return
@@ -8195,7 +8992,10 @@ class ScreenCompanion(Star):
                     and hasattr(response, "completion_text")
                     and response.completion_text
                 ):
-                    reflection_text = response.completion_text
+                    reflection_text = self._ensure_diary_reflection_text(
+                        response.completion_text,
+                        observation_text,
+                    )
             except Exception as e:
                 logger.error(f"生成日记总结失败: {e}")
 
@@ -8203,6 +9003,16 @@ class ScreenCompanion(Star):
             compacted_entries,
             reflection_text,
         )
+        reflection_text = self._ensure_diary_reflection_text(
+            reflection_text,
+            observation_text,
+            structured_summary,
+        )
+        if not structured_summary.get("suggestion_items"):
+            structured_summary["suggestion_items"] = self._extract_actionable_suggestions(
+                reflection_text,
+                limit=3,
+            )
 
         diary_content = self._build_diary_document(
             target_date=target_date,
@@ -8362,8 +9172,20 @@ class ScreenCompanion(Star):
         # 不再添加不确定表达，直接返回原始回复
         return response
 
-    def _polish_response_text(self, response_text, scene):
+    def _polish_response_text(
+        self,
+        response_text,
+        scene,
+        *,
+        contexts: list[str] | None = None,
+        allow_rest_hint: bool = False,
+        task_id: str = "",
+    ):
         """清理沉浸感较差的播报式开场，尤其是视频和阅读场景。"""
+        response_text = str(response_text or "").strip()
+        recent_contexts = list(contexts or [])
+        has_recent_context = bool(recent_contexts)
+
         # 常见的播报式开场，需要清理
         opening_phrases = [
             "我看到你在",
@@ -8394,8 +9216,20 @@ class ScreenCompanion(Star):
                     # 移除开场短语
                     response_text = response_text[len(phrase):].strip()
                     break
-        
-        return response_text
+
+        response_text = self._strip_repeated_companion_opening(
+            response_text,
+            has_recent_context=has_recent_context,
+        )
+
+        if (
+            not allow_rest_hint
+            and self._contains_rest_cue(response_text)
+            and self._has_recent_rest_cue(recent_contexts, task_id=task_id)
+        ):
+            response_text = self._strip_rest_cue_sentences(response_text)
+
+        return response_text.strip()
 
     def _learn_from_correction(self, original_response, corrected_response):
         """从用户纠正中学习。"""
@@ -8753,9 +9587,12 @@ class ScreenCompanion(Star):
                                 target = self._resolve_proactive_target()
                                 event = self._create_virtual_event(target)
 
+                                capture_timeout = self._get_capture_context_timeout(
+                                    "video" if self._use_screen_recording_mode() else "image"
+                                )
                                 capture_context = await asyncio.wait_for(
-                                    self._capture_recognition_context(),
-                                    timeout=self._get_capture_context_timeout(),
+                                    self._capture_proactive_recognition_context(),
+                                    timeout=capture_timeout,
                                 )
                                 active_window_title = capture_context.get("active_window_title", "")
                                 components = await asyncio.wait_for(
@@ -8780,6 +9617,10 @@ class ScreenCompanion(Star):
                                     prefix="【声音提醒】",
                                 ):
                                         logger.info("麦克风提醒消息发送成功")
+                                        if capture_context.get("_rest_reminder_planned"):
+                                            self._mark_rest_reminder_sent(
+                                                capture_context.get("_rest_reminder_info", {}) or {}
+                                            )
 
                                 # 更新上次触发时间
                                 self.last_mic_trigger = current_time
@@ -8995,9 +9836,12 @@ class ScreenCompanion(Star):
                                     if not background_job_started:
                                         logger.info(f"[{temp_task_id}] 跳过自定义监控识屏: {skip_reason}")
                                         return
+                                    capture_timeout = self._get_capture_context_timeout(
+                                        "video" if self._use_screen_recording_mode() else "image"
+                                    )
                                     capture_context = await asyncio.wait_for(
-                                        self._capture_recognition_context(),
-                                        timeout=self._get_capture_context_timeout(),
+                                        self._capture_proactive_recognition_context(),
+                                        timeout=capture_timeout,
                                     )
                                     capture_context["trigger_reason"] = f"定时提醒：{task['prompt']}"
                                     active_window_title = capture_context.get("active_window_title", "")
@@ -9029,12 +9873,10 @@ class ScreenCompanion(Star):
                                             )
                                             self._remember_screen_analysis_trace(analysis_trace)
                                             logger.info("自定义任务提醒消息发送成功")
-                                            
-                                            # 如果处于休息提醒时间，更新冷却时间
-                                            if self._is_in_rest_reminder_range():
-                                                import datetime
-                                                self.last_rest_reminder_time = datetime.datetime.now()
-                                                logger.info(f"[自定义任务] 已更新休息提醒冷却时间")
+                                            if capture_context.get("_rest_reminder_planned"):
+                                                self._mark_rest_reminder_sent(
+                                                    capture_context.get("_rest_reminder_info", {}) or {}
+                                                )
                                 finally:
                                     # 任务完成后清理临时任务
                                     if temp_task_id in self.temporary_tasks:
@@ -9113,6 +9955,7 @@ class ScreenCompanion(Star):
         """
         self._ensure_runtime_state()
         logger.info(f"[任务 {task_id}] 启动自动识屏任务")
+        
         try:
             while self.is_running and self.state == "active" and self._is_current_process_instance():
                 if not self._is_in_active_time_range():
@@ -9295,9 +10138,12 @@ class ScreenCompanion(Star):
                             )
                             break
 
+                        capture_timeout = self._get_capture_context_timeout(
+                            "video" if self._use_screen_recording_mode() else "image"
+                        )
                         capture_context = await asyncio.wait_for(
-                            self._capture_recognition_context(),
-                            timeout=self._get_capture_context_timeout(),
+                            self._capture_proactive_recognition_context(),
+                            timeout=capture_timeout,
                         )
                         capture_context["trigger_reason"] = decision["reason"]
                         active_window_title = capture_context.get("active_window_title", "")
@@ -9390,12 +10236,6 @@ class ScreenCompanion(Star):
                         diary_stored = self._add_diary_entry(text_content, active_window_title)
                         analysis_trace["stored_in_diary"] = bool(diary_stored)
 
-                        # 如果处于休息提醒时间，更新冷却时间
-                        if self._is_in_rest_reminder_range():
-                            import datetime
-                            self.last_rest_reminder_time = datetime.datetime.now()
-                            logger.info(f"[任务 {task_id}] 已更新休息提醒冷却时间")
-
                         # 自动分段发送，参考 splitter 插件的思路
                         if text_content:
                             logger.info(
@@ -9413,6 +10253,10 @@ class ScreenCompanion(Star):
                                 sent=sent,
                                 scene=current_scene,
                             )
+                            if sent and capture_context.get("_rest_reminder_planned"):
+                                self._mark_rest_reminder_sent(
+                                    capture_context.get("_rest_reminder_info", {}) or {}
+                                )
                         else:
                             sent = False
                             if self.is_running:
@@ -9426,6 +10270,10 @@ class ScreenCompanion(Star):
                                 sent=sent,
                                 scene=current_scene,
                             )
+                            if sent and capture_context.get("_rest_reminder_planned"):
+                                self._mark_rest_reminder_sent(
+                                    capture_context.get("_rest_reminder_info", {}) or {}
+                                )
                         analysis_trace["reply_preview"] = self._truncate_preview_text(
                             text_content or "[非纯文本回复]",
                             limit=140,

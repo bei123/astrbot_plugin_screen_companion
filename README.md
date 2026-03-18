@@ -1,12 +1,10 @@
 # 我会一直看着你
 
-`astrbot_plugin_screen_companion` 是面向 AstrBot 的屏幕伙伴插件。它能让bot随机地监视你的屏幕，并根据场景与用户进行互动。插件能监控音量、电脑状态以及你打开的窗口并进行合适的互动，且会根据每天的观察记录完成日记。此外，插件还拥有一个完善的webUI界面。灵感来源于妹居物语，适配live2D桌宠。
-
-基本功能已经完善，现已转入维护阶段，如果喜欢的话请给个 star 吧。
+`astrbot_plugin_screen_companion` 是面向 AstrBot 的屏幕伙伴插件。它结合截图、录屏、多模态识别、长期记忆、日记和 WebUI，在你使用电脑时提供更自然的观察、陪伴和回顾能力。如果喜欢的话请给个 star 吧。
 
 ## 版本
 
-当前版本：`2.7.0`
+当前版本：`2.7.1`
 
 ## 主要功能
 
@@ -65,13 +63,14 @@ pip install -r requirements.txt
 /kpi ffmpeg C:\你的路径\ffmpeg\bin\ffmpeg.exe
 ```
 
-插件会自动把 `ffmpeg.exe` 复制到插件目录的 `bin` 文件夹。
+插件会自动把 `ffmpeg.exe` 复制到插件数据目录的 `bin` 文件夹。
+Windows 默认路径通常是 `C:\Users\你的用户名\.astrbot\data\plugin_data\astrbot_plugin_screen_companion\bin\ffmpeg.exe`。
 
 ### 手动配置
 
 你也可以选择下面任意一种方式：
 
-- 把 `ffmpeg.exe` 放到 `astrbot_plugin_screen_companion/bin/ffmpeg.exe`
+- 把 `ffmpeg.exe` 放到 `C:\Users\你的用户名\.astrbot\data\plugin_data\astrbot_plugin_screen_companion\bin\ffmpeg.exe`
 - 在配置中填写完整的 `ffmpeg_path`
 - 把 `ffmpeg` 加入系统 `PATH`
 
@@ -156,7 +155,7 @@ sudo yum install ffmpeg
 ### 配置与调试
 
 - `/kpi ffmpeg`：查看当前 `ffmpeg` 状态。
-- `/kpi ffmpeg [路径]`：设置 `ffmpeg` 路径并复制到插件目录。
+- `/kpi ffmpeg [路径]`：设置 `ffmpeg` 路径并复制到插件数据目录。
 - `/kpi recent`：查看最近观察。
 - `/kpi correct [内容]`：补充纠正信息。
 - `/kpi preference [类别] [内容]`：记录偏好。
@@ -205,7 +204,7 @@ http://127.0.0.1:1068
 /kpi ffmpeg C:\你的路径\ffmpeg\bin\ffmpeg.exe
 ```
 
-然后重载插件或重启 AstrBot。也可以把 `ffmpeg.exe` 手动放到插件目录的 `bin` 文件夹。
+然后重载插件或重启 AstrBot。也可以把 `ffmpeg.exe` 手动放到插件数据目录的 `bin` 文件夹。
 
 ### 关闭外部视觉 API 后仍然看到相关报错
 

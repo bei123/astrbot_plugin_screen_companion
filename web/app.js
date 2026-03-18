@@ -923,14 +923,22 @@ function splitDiaryContent(content) {
         return sections;
     }
 
+    const overviewPattern = /##\s*今日概览\s*[\s\S]*?(?=\n##\s*今日观察|\n##\s*今日感想|\n##\s*[^\n]+|$)/;
     const observationMatch = text.match(/##\s*今日观察\s*([\s\S]*?)(?=\n##\s*今日感想|\n##\s*[^\n]+|$)/);
     const reflectionMatch = text.match(/##\s*今日感想\s*([\s\S]*?)(?=\n##\s*[^\n]+|$)/);
+    const cleanedFull = text
+        .replace(overviewPattern, "")
+        .replace(/^#\s*.+日记\s*$/m, "")
+        .replace(/^##\s*\d{4}年\d{1,2}月\d{1,2}日.*$/m, "")
+        .replace(/^\*\*天气\*\*:\s*.*$/m, "")
+        .trim();
 
     sections.observation = (observationMatch?.[1] || "").trim();
     sections.reflection = (reflectionMatch?.[1] || "").trim();
+    sections.full = cleanedFull || text.trim();
 
     if (!sections.reflection) {
-        sections.reflection = text.trim();
+        sections.reflection = sections.full;
     }
 
     return sections;
@@ -1845,4 +1853,3 @@ window.addEventListener("DOMContentLoaded", async () => {
         setConnectionState("error", `初始化失败: ${error.message}`);
     }
 });
-
