@@ -64,6 +64,7 @@ const elements = {
     loginError: document.getElementById("loginError"),
     todayActivityStats: document.getElementById("todayActivityStats"),
     totalActivityStats: document.getElementById("totalActivityStats"),
+    activityCharts: document.getElementById("activityCharts"),
     recentActivities: document.getElementById("recentActivities"),
     runtimeMeta: document.getElementById("runtimeMeta"),
     runtimeStats: document.getElementById("runtimeStats"),
@@ -224,6 +225,101 @@ function updateSummaryCards() {
         minute: "2-digit",
         second: "2-digit",
     }).format(new Date());
+}
+
+function renderUiIcon(name) {
+    const icons = {
+        work: `
+            <svg viewBox="0 0 24 24">
+                <path d="M8 6.5V5.8A1.8 1.8 0 0 1 9.8 4h4.4A1.8 1.8 0 0 1 16 5.8v.7"></path>
+                <rect x="4" y="6.5" width="16" height="11.5" rx="2"></rect>
+                <path d="M4 11.5h16"></path>
+            </svg>`,
+        play: `
+            <svg viewBox="0 0 24 24">
+                <path d="M8 8.5 16.5 12 8 15.5Z"></path>
+                <circle cx="12" cy="12" r="8.5"></circle>
+            </svg>`,
+        other: `
+            <svg viewBox="0 0 24 24">
+                <rect x="5" y="5" width="14" height="14" rx="3"></rect>
+                <path d="M9 9h6"></path>
+                <path d="M9 12h6"></path>
+                <path d="M9 15h3"></path>
+            </svg>`,
+        total: `
+            <svg viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="8.5"></circle>
+                <path d="M12 7.5v5l3 2"></path>
+            </svg>`,
+    };
+    return icons[name] || icons.total;
+}
+
+function renderActivityMetricItem(type, label, value, hint) {
+    return `
+        <div class="activity-stat-item activity-stat-item--${type}">
+            <span class="activity-stat-icon" aria-hidden="true">${renderUiIcon(type)}</span>
+            <div class="activity-stat-copy">
+                <span class="panel-label">${escapeHtml(label)}</span>
+                <span class="activity-stat-hint">${escapeHtml(hint)}</span>
+            </div>
+            <strong>${escapeHtml(value || "0分钟")}</strong>
+        </div>
+    `;
+}
+
+function renderActivityMetricGrid(stats) {
+    return [
+        renderActivityMetricItem("work", "工作时间", stats.work_time || "0分钟", "专注投入"),
+        renderActivityMetricItem("play", "摸鱼时间", stats.play_time || "0分钟", "娱乐放松"),
+        renderActivityMetricItem("other", "其他时间", stats.other_time || "0分钟", "零散切换"),
+        renderActivityMetricItem("total", "总时间", stats.total_time || "0分钟", "当前统计周期"),
+    ].join("");
+}
+
+function buildActivityChartCard(title, stats) {
+    const totalSeconds = Number(stats.total_seconds || 0);
+    const segments = [
+        { key: "work", label: "工作", seconds: Number(stats.work_seconds || 0), value: stats.work_time || "0分钟" },
+        { key: "play", label: "摸鱼", seconds: Number(stats.play_seconds || 0), value: stats.play_time || "0分钟" },
+        { key: "other", label: "其他", seconds: Number(stats.other_seconds || 0), value: stats.other_time || "0分钟" },
+    ];
+    const barHtml = totalSeconds > 0
+        ? segments
+            .filter((segment) => segment.seconds > 0)
+            .map((segment) => `<span class="activity-bar-segment activity-bar-segment--${segment.key}" style="width:${(segment.seconds / totalSeconds) * 100}%"></span>`)
+            .join("")
+        : '<span class="activity-bar-segment activity-bar-segment--empty" style="width:100%"></span>';
+    const legendHtml = segments.map((segment) => {
+        const ratio = totalSeconds > 0 ? `${Math.round((segment.seconds / totalSeconds) * 100)}%` : "0%";
+        return `
+            <li class="activity-legend-item">
+                <span class="activity-legend-dot activity-legend-dot--${segment.key}"></span>
+                <span>${escapeHtml(segment.label)}</span>
+                <strong>${escapeHtml(segment.value)}</strong>
+                <em>${escapeHtml(ratio)}</em>
+            </li>
+        `;
+    }).join("");
+    return `
+        <article class="activity-breakdown-card">
+            <div class="activity-breakdown-head">
+                <strong>${escapeHtml(title)}</strong>
+                <span class="panel-subtle">总计 ${escapeHtml(stats.total_time || "0分钟")}</span>
+            </div>
+            <div class="activity-breakdown-bar">${barHtml}</div>
+            <ul class="activity-legend">${legendHtml}</ul>
+        </article>
+    `;
+}
+
+function renderActivityCharts(today, total) {
+    if (!elements.activityCharts) return;
+    elements.activityCharts.innerHTML = [
+        buildActivityChartCard("今日配比", today),
+        buildActivityChartCard("累计配比", total),
+    ].join("");
 }
 
 function getSettingMeta(key) {
@@ -480,7 +576,7 @@ function renderRuntimeMedia(runtime) {
         card.className = "runtime-media-card";
         const title = item.kind === "video" ? "最新录屏" : "最新截图";
         const meta = item.available
-            ? `${formatDateTime(item.updated_at)} · ${formatBytes(item.size_bytes)}`
+            ? `${formatDateTime(item.updated_at)} 路 ${formatBytes(item.size_bytes)}`
             : (item.message || "暂无可预览素材");
         let preview = '<div class="empty-state"><strong>暂无可预览素材</strong></div>';
         if (item.available && item.url) {
@@ -520,7 +616,7 @@ function renderHealthChecks() {
     }
 
     const health = state.health;
-    elements.healthMeta.textContent = `最近检查: ${formatDateTime(health.checked_at)} | 服务: ${health.service || "unknown"}`;
+    elements.healthMeta.textContent = `最近检查 ${formatDateTime(health.checked_at)} | 服务: ${health.service || "unknown"}`;
     const cards = [
         ["健康状态", health.status || "unknown"],
         ["实例版本", health.version || "--"],
@@ -670,7 +766,7 @@ function renderSettingsGroups() {
         button.className = "settings-group-button";
         if (group.id === state.activeSettingsGroup) button.classList.add("active");
         button.innerHTML = `
-            <strong>${escapeHtml(group.title)}${groupDirtyCount ? ` · ${groupDirtyCount}` : ""}</strong>
+            <strong>${escapeHtml(group.title)}${groupDirtyCount ? ` 路 ${groupDirtyCount}` : ""}</strong>
             <span>${escapeHtml(group.description || "")}</span>
         `;
         button.addEventListener("click", () => {
@@ -719,7 +815,7 @@ function renderSettingsForm() {
         if (isSettingDirty(fieldKey)) wrapper.classList.add("settings-field-dirty");
 
         const badges = [
-            `<span class="settings-badge">默认 ${escapeHtml(formatSettingPreview(meta.default))}</span>`,
+            `<span class="settings-badge">默认 ${escapeHtml(formatSettingPreview(meta.default))}</span>`, 
             `<code>${escapeHtml(fieldKey)}</code>`,
         ];
         if (isSettingDirty(fieldKey)) {
@@ -929,7 +1025,7 @@ function splitDiaryContent(content) {
     const cleanedFull = text
         .replace(overviewPattern, "")
         .replace(/^#\s*.+日记\s*$/m, "")
-        .replace(/^##\s*\d{4}年\d{1,2}月\d{1,2}日.*$/m, "")
+        .replace(/^##\s*\d{4}年\d{1,2}月\d{1,2}日\s*$/m, "")
         .replace(/^\*\*天气\*\*:\s*.*$/m, "")
         .trim();
 
@@ -960,7 +1056,7 @@ function renderDiaryList() {
         if (entry.date === state.selectedDiaryDate) button.classList.add("active");
         button.innerHTML = `
             <p class="list-item-title">${escapeHtml(formatDateLabel(entry.date))}</p>
-            <p class="list-item-meta">文件名: ${escapeHtml(entry.filename)}</p>
+            <p class="list-item-meta">文件名 ${escapeHtml(entry.filename)}</p>
         `;
         button.addEventListener("click", () => {
             elements.diaryDateInput.value = entry.date;
@@ -994,7 +1090,7 @@ function renderDiaryStructuredSummary(summary) {
         blocks.push(`
             <div>
                 <strong>今日主要窗口</strong>
-                <p>${escapeHtml(mainWindows.slice(0, 3).map((item) => `${item.window_title || "当前窗口"}（约 ${item.duration_minutes || 0} 分钟）`).join("、"))}</p>
+                <p>${escapeHtml(mainWindows.slice(0, 3).map((item) => `${item.window_title || "当前窗口"}（约 ${item.duration_minutes || 0} 分钟）`).join("；"))}</p>
             </div>
         `);
     }
@@ -1004,7 +1100,7 @@ function renderDiaryStructuredSummary(summary) {
         blocks.push(`
             <div>
                 <strong>最长停留任务</strong>
-                <p>${escapeHtml(`${longestTask.window_title}（约 ${longestTask.duration_minutes || 0} 分钟）${longestTask.focus ? `，主要在：${longestTask.focus}` : ""}`)}</p>
+                <p>${escapeHtml(`${longestTask.window_title}（约 ${longestTask.duration_minutes || 0} 分钟${longestTask.focus ? `，主要在：${longestTask.focus}` : ""}）`)}</p>
             </div>
         `);
     }
@@ -1076,7 +1172,7 @@ function renderDiaryDetail(date, content, structuredSummary = {}) {
 
     const diary = splitDiaryContent(content);
     const structuredSummaryHtml = renderDiaryStructuredSummary(structuredSummary);
-    elements.diaryReflection.innerHTML = `${structuredSummaryHtml}${renderDiaryMarkdown(diary.reflection || diary.full)}`;
+    elements.diaryReflection.innerHTML = `${renderDiaryMarkdown(diary.reflection || diary.full)}${structuredSummaryHtml}`;
 
     if (diary.observation) {
         const structuredEntries = parseDiaryObservationEntries(diary.observation);
@@ -1284,7 +1380,7 @@ function renderMemories() {
                 <div>
                     <div class="memory-header">
                         <strong>${escapeHtml(item.title)}</strong>
-                        <span class="tag">优先级 ${escapeHtml(item.priority ?? 0)}</span>
+                        <span class="tag">浼樺厛绾?${escapeHtml(item.priority ?? 0)}</span>
                     </div>
                     <p class="memory-content">${escapeHtml(item.summary)}</p>
                     <p class="memory-meta">${escapeHtml(item.meta || "")}</p>
@@ -1314,7 +1410,7 @@ function renderRuntime() {
         return;
     }
 
-    elements.runtimeMeta.textContent = `状态: ${runtime.state || "unknown"} | 自动任务 ${runtime.active_task_count || 0} 个`;
+    elements.runtimeMeta.textContent = `状态 ${runtime.state || "unknown"} | 自动任务 ${runtime.active_task_count || 0} 个`;
     const cards = [
         ["插件状态", runtime.enabled ? "已启用" : "已关闭"],
         ["运行中", runtime.is_running ? "是" : "否"],
@@ -1460,6 +1556,7 @@ async function loadMemories() {
 async function loadActivityStats() {
     renderLoading(elements.todayActivityStats, "正在加载活动统计...");
     renderLoading(elements.totalActivityStats, "正在加载活动统计...");
+    if (elements.activityCharts) renderLoading(elements.activityCharts, "正在生成活动图表...");
     renderLoading(elements.recentActivities, "正在加载活动统计...");
     try {
         const data = await apiFetch("/api/activity");
@@ -1469,63 +1566,29 @@ async function loadActivityStats() {
         console.error("加载活动统计失败:", error);
         elements.todayActivityStats.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
         elements.totalActivityStats.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
+        if (elements.activityCharts) {
+            elements.activityCharts.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法生成活动图表</p></div>";
+        }
         elements.recentActivities.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
     }
 }
 
 function renderActivityStats() {
     if (!state.activityStats) return;
-    
+
     const today = state.activityStats.today || {};
     const total = state.activityStats.total || {};
     const recentActivities = state.activityStats.recent_activities || [];
-    
-    // 渲染今日统计
-    elements.todayActivityStats.innerHTML = `
-        <div class="activity-stat-item">
-            <span class="panel-label">工作时间</span>
-            <strong>${today.work_time || "0分0秒"}</strong>
-        </div>
-        <div class="activity-stat-item">
-            <span class="panel-label">摸鱼时间</span>
-            <strong>${today.play_time || "0分0秒"}</strong>
-        </div>
-        <div class="activity-stat-item">
-            <span class="panel-label">其他时间</span>
-            <strong>${today.other_time || "0分0秒"}</strong>
-        </div>
-        <div class="activity-stat-item">
-            <span class="panel-label">总时间</span>
-            <strong>${today.total_time || "0分0秒"}</strong>
-        </div>
-    `;
-    
-    // 渲染总计统计
-    elements.totalActivityStats.innerHTML = `
-        <div class="activity-stat-item">
-            <span class="panel-label">工作时间</span>
-            <strong>${total.work_time || "0分0秒"}</strong>
-        </div>
-        <div class="activity-stat-item">
-            <span class="panel-label">摸鱼时间</span>
-            <strong>${total.play_time || "0分0秒"}</strong>
-        </div>
-        <div class="activity-stat-item">
-            <span class="panel-label">其他时间</span>
-            <strong>${total.other_time || "0分0秒"}</strong>
-        </div>
-        <div class="activity-stat-item">
-            <span class="panel-label">总时间</span>
-            <strong>${total.total_time || "0分0秒"}</strong>
-        </div>
-    `;
-    
-    // 渲染最近活动
+
+    elements.todayActivityStats.innerHTML = renderActivityMetricGrid(today);
+    elements.totalActivityStats.innerHTML = renderActivityMetricGrid(total);
+    renderActivityCharts(today, total);
+
     if (recentActivities.length === 0) {
         elements.recentActivities.innerHTML = "<div class='empty-state'><strong>暂无活动记录</strong><p>开始使用插件后，这里会显示您的活动记录</p></div>";
         return;
     }
-    
+
     elements.recentActivities.innerHTML = recentActivities.map(activity => `
         <article class="observation-card">
             <div class="observation-header">
@@ -1610,7 +1673,7 @@ elements.refreshButton.addEventListener("click", async () => {
         await refreshActiveSection();
         setConnectionState("online", "数据已刷新。");
     } catch (error) {
-        setConnectionState("error", `鍒锋柊澶辫触: ${error.message}`);
+        setConnectionState("error", `刷新失败: ${error.message}`);
     }
 });
 
@@ -1702,7 +1765,7 @@ elements.loginForm.addEventListener("submit", async (event) => {
         setConnectionState("online", "登录成功，正在加载数据。");
         await refreshActiveSection();
     } catch (error) {
-        elements.loginError.textContent = `鐧诲綍澶辫触: ${error.message}`;
+        elements.loginError.textContent = `登录失败: ${error.message}`;
     }
 });
 
@@ -1826,7 +1889,7 @@ elements.stopTasksButton.addEventListener("click", async () => {
         renderRuntime();
         elements.runtimeFeedback.textContent = "当前自动任务已停止。";
     } catch (error) {
-        elements.runtimeFeedback.textContent = `鍋滄澶辫触: ${error.message}`;
+        elements.runtimeFeedback.textContent = `停止失败: ${error.message}`;
     }
 });
 
@@ -1853,3 +1916,5 @@ window.addEventListener("DOMContentLoaded", async () => {
         setConnectionState("error", `初始化失败: ${error.message}`);
     }
 });
+
+

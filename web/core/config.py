@@ -59,6 +59,7 @@ class PluginConfig(BaseModel):
     vision_api_url_backup: str = ""
     vision_api_key_backup: str = ""
     vision_api_model_backup: str = ""
+    enable_privacy_guard: bool = True
     user_preferences: str = "游戏 专业的游戏高手，指导玩家提升水平"
     use_llm_for_start_end: bool = True  # 是否使用LLM回复开始和结束消息
     start_preset: str = "知道啦~我会时不时过来看一眼的"

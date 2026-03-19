@@ -22,6 +22,7 @@ DEFAULT_SYSTEM_PROMPT = """
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event.filter import PermissionType, permission_type
 from astrbot.api.message_components import BaseMessageComponent, Image, Plain
 from astrbot.api.star import Context, Star, StarTools
 
@@ -59,6 +60,12 @@ class ScreenCompanion(Star):
     SCREEN_ANALYSIS_FAILURE_BACKOFF_BASE_SECONDS = 30
     SCREEN_ANALYSIS_FAILURE_BACKOFF_MAX_SECONDS = 5 * 60
     SCREEN_TRACE_LIMIT = 40
+    SHORT_EMOTION_MEMORY_TTL_SECONDS = 18 * 60
+    SHORT_EMOTION_MEMORY_TURNS = 3
+    REPLY_VARIATION_TTL_SECONDS = 2 * 60 * 60
+    REPLY_VARIATION_HISTORY_LIMIT = 8
+    START_END_CONTEXT_LOOKBACK = 2
+    SENSITIVE_SKIP_NOTE = "检测到敏感界面，已跳过回复"
     LONG_TERM_MEMORY_RETENTION_DAYS = 45
     LIGHT_MEMORY_RETENTION_DAYS = 90
     EPISODIC_MEMORY_LIMIT = 120
@@ -94,6 +101,9 @@ class ScreenCompanion(Star):
         self._recording_ffmpeg_path = None
         self._recording_video_encoder = None
         self._recording_video_encoder_source = ""
+        self._mic_monitor_background_task = None
+        self._mic_input_device_index = None
+        self._mic_input_device_name = ""
         self.state = "inactive"  # active, inactive, temporary
         self.temporary_tasks = {}
         # 固定自动观察任务 ID
@@ -177,6 +187,12 @@ class ScreenCompanion(Star):
         self.recent_user_activity = {}
         self.screen_analysis_traces = []
         
+        # 情绪记忆短缓存
+        self.recent_emotion_memory = {}
+        
+        # 回复变体（固定句式复用）
+        self.recent_reply_variations = {}
+        
         # 时间跟踪相关
         self.current_activity = None  # 当前活动
         self.activity_start_time = None  # 活动开始时间
@@ -216,8 +232,7 @@ class ScreenCompanion(Star):
         task = asyncio.create_task(self._custom_tasks_task())
         self.background_tasks.append(task)
 
-        task = asyncio.create_task(self._mic_monitor_task())
-        self.background_tasks.append(task)
+        self._ensure_mic_monitor_background_task()
         task = asyncio.create_task(self._window_companion_task())
         self.background_tasks.append(task)
         self._shutdown_lock = asyncio.Lock()
@@ -1020,9 +1035,15 @@ class ScreenCompanion(Star):
                 old_recognition_mode = self._normalize_screen_recognition_mode(
                     getattr(self, "screen_recognition_mode", self.SCREENSHOT_MODE)
                 )
+                old_mic_monitor_enabled = bool(getattr(self, "enable_mic_monitor", False))
                 self._apply_plugin_config_updates(config_dict)
 
                 self._sync_all_config()
+                
+                if self.enable_mic_monitor:
+                    self._ensure_mic_monitor_background_task()
+                elif old_mic_monitor_enabled:
+                    self._stop_mic_monitor_background_task()
 
                 # 检查是否明确设置了空密码
                 password_set_to_empty = False
@@ -5091,6 +5112,352 @@ class ScreenCompanion(Star):
             return preview
         return preview[: max(0, limit - 1)] + "…"
 
+    def _normalize_record_text(self, text: str) -> str:
+        return str(text or "").strip().lower()
+
+    def _get_recent_reply_openings(self, interaction_key: str) -> list[str]:
+        self._ensure_runtime_state()
+        key = str(interaction_key or "").strip()
+        if not key:
+            return []
+        
+        now_ts = time.time()
+        records = self.recent_reply_variations.get(key, [])
+        fresh_records = [
+            item
+            for item in records
+            if isinstance(item, dict)
+            and str(item.get("opening", "") or "").strip()
+            and (now_ts - float(item.get("timestamp", 0.0) or 0.0))
+            <= self.REPLY_VARIATION_TTL_SECONDS
+        ]
+        self.recent_reply_variations[key] = fresh_records[-self.REPLY_VARIATION_HISTORY_LIMIT :]
+
+        unique_openings: list[str] = []
+        for item in reversed(self.recent_reply_variations[key]):
+            opening = str(item.get("opening", "") or "").strip()
+            if opening and opening not in unique_openings:
+                unique_openings.append(opening)
+        return unique_openings
+
+    def _record_reply_opening(self, interaction_key: str, opening: str, *, channel: str = "reply") -> None:
+        self._ensure_runtime_state()
+        key = str(interaction_key or "").strip()
+        if not key:
+            return
+        
+        opening = str(opening or "").strip()
+        if not opening:
+            return
+        
+        now_ts = time.time()
+        records = self.recent_reply_variations.get(key, [])
+        records = [
+            item
+            for item in records
+            if isinstance(item, dict)
+            and (now_ts - float(item.get("timestamp", 0.0) or 0.0))
+            <= self.REPLY_VARIATION_TTL_SECONDS
+        ]
+        records.append(
+            {
+                "opening": opening,
+                "timestamp": now_ts,
+                "channel": str(channel or "reply"),
+            }
+        )
+        self.recent_reply_variations[key] = records[-self.REPLY_VARIATION_HISTORY_LIMIT :]
+
+    def _build_reply_variation_guidance(self, interaction_key: str) -> str:
+        recent_openings = self._get_recent_reply_openings(interaction_key)
+        if recent_openings:
+            joined = " / ".join(f'"{item}"' for item in recent_openings)
+            return (
+                f"最近几次开头已经用过{joined}。这一轮换个切入点，"
+                "必要时可以直接进入观察、判断或下一步，不要再复用这些固定句式。"
+            )
+        return (
+            "开头尽量轮换，少用'我看了下''你现在像是在''可以试试'这类固定句式连着出现，"
+            "如果没必要开场，直接切入最关键的信息。"
+        )
+
+    def _get_active_emotion_memory(self, interaction_key: str) -> dict[str, Any] | None:
+        self._ensure_runtime_state()
+        key = str(interaction_key or "").strip()
+        if not key:
+            return None
+
+        memory = self.recent_emotion_memory.get(key)
+        if not isinstance(memory, dict):
+            return None
+
+        now_ts = time.time()
+        if (
+            float(memory.get("expires_at", 0.0) or 0.0) <= now_ts
+            or int(memory.get("remaining_turns", 0) or 0) <= 0
+        ):
+            self.recent_emotion_memory.pop(key, None)
+            return None
+        return memory
+
+    def _remember_emotion_cue(
+        self,
+        interaction_key: str,
+        *,
+        label: str,
+        detail: str,
+        scene: str = "",
+        active_window_title: str = "",
+    ) -> dict[str, Any]:
+        self._ensure_runtime_state()
+        key = str(interaction_key or "").strip()
+        if not key:
+            return {}
+
+        memory = {
+            "label": str(label or "").strip(),
+            "detail": self._truncate_preview_text(detail, limit=80),
+            "scene": self._normalize_scene_label(scene),
+            "window_title": self._normalize_window_title(active_window_title),
+            "updated_at": time.time(),
+            "expires_at": time.time() + self.SHORT_EMOTION_MEMORY_TTL_SECONDS,
+            "remaining_turns": self.SHORT_EMOTION_MEMORY_TURNS,
+        }
+        self.recent_emotion_memory[key] = memory
+        return memory
+
+    def _consume_emotion_memory(self, interaction_key: str) -> None:
+        memory = self._get_active_emotion_memory(interaction_key)
+        if not memory:
+            return
+
+        remaining_turns = int(memory.get("remaining_turns", 0) or 0) - 1
+        if remaining_turns <= 0:
+            self.recent_emotion_memory.pop(str(interaction_key or "").strip(), None)
+            return
+        memory["remaining_turns"] = remaining_turns
+
+    def _refresh_emotion_memory(
+        self,
+        interaction_key: str,
+        *,
+        contexts: list[str] | None = None,
+        recognition_text: str = "",
+        active_window_title: str = "",
+        scene: str = "",
+    ) -> dict[str, Any] | None:
+        key = str(interaction_key or "").strip()
+        if not key:
+            return None
+
+        user_contexts = [
+            str(item or "").strip()
+            for item in (contexts or [])
+            if str(item or "").strip().startswith("用户:")
+        ]
+        recent_user_context = " ".join(user_contexts[-2:])
+        combined_text = " ".join(
+            part
+            for part in (
+                recent_user_context,
+                str(recognition_text or "").strip(),
+                str(active_window_title or "").strip(),
+            )
+            if part
+        )
+        normalized = self._normalize_record_text(combined_text)
+        if normalized:
+            detected_label = ""
+            if any(
+                keyword in normalized
+                for keyword in (
+                    "完成",
+                    "搞定",
+                    "解决了",
+                    "成功",
+                    "done",
+                    "completed",
+                    "resolved",
+                    "passed",
+                    "success",
+                    "已提交",
+                    "发布成功",
+                    "导出完成",
+                )
+            ):
+                detected_label = "完成"
+            elif any(
+                keyword in normalized
+                for keyword in (
+                    "卡住",
+                    "卡关",
+                    "报错",
+                    "错误",
+                    "失败",
+                    "异常",
+                    "没反应",
+                    "stuck",
+                    "error",
+                    "exception",
+                    "traceback",
+                    "failed",
+                    "bug",
+                )
+            ):
+                detected_label = "卡关"
+            elif any(
+                keyword in normalized
+                for keyword in (
+                    "等下",
+                    "稍等",
+                    "等会",
+                    "一会",
+                    "先别",
+                    "被打断",
+                    "来电话",
+                    "电话",
+                    "开会",
+                    "会议",
+                    "先去",
+                    "回来再",
+                    "临时",
+                    "突然",
+                )
+            ):
+                detected_label = "被打断"
+
+            if detected_label:
+                return self._remember_emotion_cue(
+                    key,
+                    label=detected_label,
+                    detail=combined_text,
+                    scene=scene,
+                    active_window_title=active_window_title,
+                )
+
+        return self._get_active_emotion_memory(key)
+
+    def _build_emotion_continuity_guidance(self, emotion_memory: dict[str, Any] | None) -> str:
+        if not isinstance(emotion_memory, dict):
+            return ""
+
+        label = str(emotion_memory.get("label", "") or "").strip()
+        if label == "被打断":
+            return (
+                "用户刚刚像是被打断过，语气顺着刚才的节奏轻一点，"
+                "别每次都像重新开场；如果这轮没有新帮助点，安静陪着也可以。"
+            )
+        if label == "卡关":
+            return (
+                "用户刚刚像是卡住过，继续一起排错的语气，先接住卡点，"
+                "再给最有用的一步，不要突然变成空洞鼓励。"
+            )
+        if label == "完成":
+            return (
+                "用户刚刚像是完成了一段任务，语气可以带一点收尾后的松弛或确认感，"
+                "但不要夸张祝贺，也不要像重新认识对方。"
+            )
+        return ""
+
+    def _detect_sensitive_screen(
+        self,
+        *,
+        scene: str,
+        active_window_title: str,
+        recognition_text: str = "",
+    ) -> dict[str, str] | None:
+        normalized_scene = self._normalize_scene_label(scene)
+        title_lower = str(active_window_title or "").strip().lower()
+        text_lower = str(recognition_text or "").strip().lower()
+        combined_text = f"{title_lower} {text_lower}"
+
+        checks = [
+            (
+                "payment",
+                (
+                    "支付",
+                    "付款",
+                    "转账",
+                    "充值",
+                    "支付宝",
+                    "微信支付",
+                    "pay",
+                    "payment",
+                    "checkout",
+                    "信用卡",
+                    "银行卡",
+                    "验证码",
+                    "密码",
+                ),
+            ),
+            (
+                "password",
+                (
+                    "密码管理器",
+                    "密码管理",
+                    "keepass",
+                    "1password",
+                    "bitwarden",
+                    "lastpass",
+                    "登录",
+                    "登陆",
+                    "login",
+                    "signin",
+                ),
+            ),
+            (
+                "auth",
+                (
+                    "验证码",
+                    "2fa",
+                    "two-factor",
+                    "二次验证",
+                    "验证短信",
+                    "手机验证码",
+                ),
+            ),
+        ]
+
+        chat_keywords = (
+            "qq",
+            "微信",
+            "wechat",
+            "telegram",
+            "discord",
+            "slack",
+            "teams",
+            "whatsapp",
+        )
+        if any(keyword in combined_text for keyword in chat_keywords):
+            return {"category": "chat", "note": self.SENSITIVE_SKIP_NOTE}
+
+        for category, keywords in checks:
+            if any(keyword in combined_text for keyword in keywords):
+                return {"category": category, "note": self.SENSITIVE_SKIP_NOTE}
+        return None
+
+    def _mark_sensitive_skip(
+        self,
+        *,
+        analysis_trace: dict[str, Any],
+        scene: str,
+        active_window_title: str,
+        sensitive_info: dict[str, str],
+    ) -> None:
+        note = str((sensitive_info or {}).get("note") or self.SENSITIVE_SKIP_NOTE).strip()
+        observation_stored = self._add_observation(
+            scene,
+            note,
+            active_window_title,
+            extra={
+                "analysis_trace": analysis_trace,
+                "sensitive": sensitive_info,
+                "reply": None,
+            },
+        )
+        if observation_stored:
+            logger.info(f"[屏幕助手] 敏感场景已记录，跳过回复: {note}")
+
     def _contains_rest_cue(self, text: str) -> bool:
         normalized = str(text or "").strip()
         if not normalized:
@@ -7672,6 +8039,7 @@ class ScreenCompanion(Star):
             except Exception as e:
                 logger.error(f"清理临时截图失败: {e}")
 
+    @permission_type(PermissionType.ADMIN)
     @filter.command("kp")
     async def kp(self, event: AstrMessageEvent):
         """立即执行一次截图分析。"""
@@ -7722,6 +8090,7 @@ class ScreenCompanion(Star):
             logger.error(traceback.format_exc())
             yield event.plain_result("这次处理失败了，我先缓一口气，你可以再试一次。")
 
+    @permission_type(PermissionType.ADMIN)
     @filter.command("kpr")
     async def kpr(self, event: AstrMessageEvent):
         """\u7acb\u5373\u6267\u884c\u4e00\u6b21\u5f55\u5c4f\u5206\u6790\u3002"""
@@ -7856,6 +8225,7 @@ class ScreenCompanion(Star):
         except Exception as e:
             logger.error(f"自然语言识屏助手失败: {e}")
 
+    @permission_type(PermissionType.ADMIN)
     @filter.command("kps")
     async def kps(self, event: AstrMessageEvent):
         """切换自动观察运行状态。"""
@@ -7919,6 +8289,7 @@ class ScreenCompanion(Star):
         """管理自动观察屏幕任务。"""
         pass
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("ys")
     async def kpi_ys(self, event: AstrMessageEvent, preset_index: int = None):
         """切换预设。"""
@@ -7949,6 +8320,7 @@ class ScreenCompanion(Star):
             f"已切换到预设 {preset_index}: {preset['name']}，间隔 {preset['check_interval']} 秒，触发概率 {preset['trigger_probability']}%"
         )
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("start")
     async def kpi_start(self, event: AstrMessageEvent):
         self._ensure_runtime_state()
@@ -7977,6 +8349,7 @@ class ScreenCompanion(Star):
         start_response = await self._get_start_response(event.unified_msg_origin)
         yield event.plain_result(f"已启动自动观察任务 {self.AUTO_TASK_ID}。\n{start_response}")
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("stop")
     async def kpi_stop(self, event: AstrMessageEvent, task_id: str = None):
         """停止自动观察任务。"""
@@ -8082,12 +8455,14 @@ class ScreenCompanion(Star):
         report = await self._build_kpi_doctor_report(event)
         yield event.plain_result(report)
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("status")
     async def kpi_status(self, event: AstrMessageEvent):
         """输出当前运行状态和关键诊断信息。"""
         async for result in self._render_status_report(event):
             yield result
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("list")
     async def kpi_list(self, event: AstrMessageEvent):
         """列出当前运行中的自动观察任务。"""
@@ -8100,6 +8475,7 @@ class ScreenCompanion(Star):
                 msg += f"- {task_id}\n"
             yield event.plain_result(msg)
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("ffmpeg")
     async def kpi_ffmpeg(self, event: AstrMessageEvent, ffmpeg_path: str = None):
         """设置 ffmpeg 路径并自动复制到插件数据目录。"""
@@ -8138,6 +8514,7 @@ class ScreenCompanion(Star):
         except Exception as e:
             yield event.plain_result(f"复制失败：{str(e)}")
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("y")
     async def kpi_y(self, event: AstrMessageEvent, preset_index: int = None, interval: int = None, probability: int = None):
         """新增或修改自定义预设。"""
@@ -8204,12 +8581,14 @@ class ScreenCompanion(Star):
         msg += "\n切换预设: /kpi [预设序号]，例如 /kpi 0"
         yield event.plain_result(msg)
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("p")
     async def kpi_p(self, event: AstrMessageEvent):
         """列出全部自定义预设。"""
         async for result in self._render_preset_list(event):
             yield result
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("add")
     async def kpi_add(self, event: AstrMessageEvent, interval: int, *prompt):
         """新增一个自定义观察任务。"""
@@ -8240,6 +8619,7 @@ class ScreenCompanion(Star):
         except ValueError:
             yield event.plain_result("用法: /kpi add [间隔秒数] [自定义提示词]")
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("d")
     async def kpi_d(self, event: AstrMessageEvent, date: str = None):
         """查看指定日期的日记。"""
@@ -8405,6 +8785,7 @@ class ScreenCompanion(Star):
             logger.error(f"读取日记失败: {e}")
             yield event.plain_result("读取这篇日记时出了点问题。")
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("correct")
     async def kpi_correct(self, event: AstrMessageEvent, *args):
         """纠正 Bot 的回复。"""
@@ -8421,6 +8802,7 @@ class ScreenCompanion(Star):
         
         yield event.plain_result("已记录这次纠正，我会把它作为后续参考。")
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("preference")
     async def kpi_preference(self, event: AstrMessageEvent, category: str, *preference):
         """添加用户偏好。"""
@@ -8443,6 +8825,7 @@ class ScreenCompanion(Star):
         
         yield event.plain_result(f"已添加偏好: {category} - {preference_content}")
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("recent")
     async def kpi_recent(self, event: AstrMessageEvent, days: int = 3):
         """查看最近几天的日记。"""
@@ -8576,6 +8959,7 @@ class ScreenCompanion(Star):
         blame_task = asyncio.create_task(generate_blame())
         self.background_tasks.append(blame_task)
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("debug")
     async def kpi_debug(self, event: AstrMessageEvent, status: str = None):
         """切换调试模式 /kpi debug [on/off]"""
@@ -8595,6 +8979,7 @@ class ScreenCompanion(Star):
         else:
             yield event.plain_result("用法: /kpi debug [on/off]")
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("webui")
     async def kpi_webui(self, event: AstrMessageEvent, action: str = ""):
         """查看或控制 WebUI /kpi webui [start/stop]"""
@@ -8619,6 +9004,7 @@ class ScreenCompanion(Star):
         else:
             yield event.plain_result("无效操作，请使用 /kpi webui start 或 /kpi webui stop")
 
+    @permission_type(PermissionType.ADMIN)
     @kpi_group.command("cd")
     async def kpi_cd(self, event: AstrMessageEvent, date: str = None):
         """补写日记 /kpi cd [YYYYMMDD]"""
@@ -9448,69 +9834,149 @@ class ScreenCompanion(Star):
 
         logger.info(f"解析到 {len(self.parsed_custom_tasks)} 个自定义监控任务")
 
+    def _resolve_microphone_input_device(self, pyaudio_instance):
+        cached_index = getattr(self, "_mic_input_device_index", None)
+        if cached_index is not None:
+            try:
+                cached_info = pyaudio_instance.get_device_info_by_index(int(cached_index))
+                if int(cached_info.get("maxInputChannels", 0) or 0) > 0:
+                    return int(cached_info["index"]), cached_info
+            except Exception:
+                self._mic_input_device_index = None
+                self._mic_input_device_name = ""
+
+        candidates = []
+        try:
+            default_info = pyaudio_instance.get_default_input_device_info()
+            if int(default_info.get("maxInputChannels", 0) or 0) > 0:
+                candidates.append(default_info)
+        except Exception:
+            default_info = None
+
+        try:
+            device_count = int(pyaudio_instance.get_device_count() or 0)
+        except Exception:
+            device_count = 0
+
+        for index in range(device_count):
+            try:
+                info = pyaudio_instance.get_device_info_by_index(index)
+            except Exception:
+                continue
+            if int(info.get("maxInputChannels", 0) or 0) <= 0:
+                continue
+            if any(int(existing.get("index", -1)) == int(info.get("index", -2)) for existing in candidates):
+                continue
+            candidates.append(info)
+
+        if not candidates:
+            return None, None
+
+        info = candidates[0]
+        try:
+            device_index = int(info.get("index"))
+        except Exception:
+            return None, None
+
+        self._mic_input_device_index = device_index
+        self._mic_input_device_name = str(info.get("name", "") or "")
+        return device_index, info
+
     def _get_microphone_volume(self):
         """读取当前麦克风音量。"""
+        self._ensure_runtime_state()
+        p = None
+        stream = None
         try:
             import numpy as np
             import pyaudio
 
-            # 初始化 PyAudio
             p = pyaudio.PyAudio()
+            device_index, device_info = self._resolve_microphone_input_device(p)
+            if device_info is None:
+                logger.warning("未找到可用的麦克风输入设备，已跳过本轮音量检测")
+                return 0
 
-            # 打开麦克风输入流
+            sample_rate = int(float(device_info.get("defaultSampleRate", 44100) or 44100))
+            frames_per_buffer = 2048
             stream = p.open(
                 format=pyaudio.paInt16,
                 channels=1,
-                rate=44100,
+                rate=max(8000, sample_rate),
                 input=True,
-                frames_per_buffer=1024,
+                input_device_index=device_index,
+                frames_per_buffer=frames_per_buffer,
+                start=False,
             )
+            stream.start_stream()
 
-            # 读取音频数据
-            data = stream.read(1024)
+            chunks = []
+            for chunk_index in range(4):
+                raw = stream.read(frames_per_buffer, exception_on_overflow=False)
+                if not raw:
+                    continue
+                if chunk_index == 0:
+                    continue
+                chunk = np.frombuffer(raw, dtype=np.int16)
+                if chunk.size:
+                    chunks.append(chunk.astype(np.float32))
 
-            # 关闭音频流
-            stream.stop_stream()
-            stream.close()
-            p.terminate()
-
-            # 计算音量
-            audio_data = np.frombuffer(data, dtype=np.int16)
-            
-            # 检查音频数据是否为空
-            if len(audio_data) == 0:
-                logger.debug("闊抽鏁版嵁涓虹┖")
+            if not chunks:
                 return 0
-                
-            # 计算均方根，并处理可能的空数据
-            try:
-                square_data = np.square(audio_data)
-                mean_square = np.mean(square_data)
-                
-                # 检查 mean_square 是否为 NaN
-                if np.isnan(mean_square):
-                    logger.debug("鍧囧间负NaN")
-                    return 0
-                    
-                rms = np.sqrt(mean_square)
-                
-                # 检查 rms 是否为 NaN
-                if np.isnan(rms):
-                    logger.debug("RMS涓篘aN")
-                    return 0
 
-                # 将音量映射到 0-100 范围
-                volume = min(100, int(rms / 32768 * 100 * 5))
-                return volume
-            except Exception as e:
-                logger.error(f"计算音量时出错: {e}")
+            audio_data = np.concatenate(chunks)
+            if audio_data.size == 0:
                 return 0
+
+            mean_square = float(np.mean(np.square(audio_data, dtype=np.float32), dtype=np.float64))
+            if not np.isfinite(mean_square) or mean_square <= 0:
+                return 0
+
+            rms = float(np.sqrt(mean_square))
+            if not np.isfinite(rms) or rms <= 0:
+                return 0
+
+            volume = min(100, max(0, int(rms / 32768.0 * 100 * 5)))
+            return volume
         except ImportError:
-            logger.debug("Debug event")
+            logger.debug("麦克风监听依赖未安装，无法读取音量")
             return 0
         except Exception as e:
             logger.error(f"获取麦克风音量失败: {e}")
             return 0
+        finally:
+            if stream is not None:
+                try:
+                    stream.stop_stream()
+                except Exception:
+                    pass
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            if p is not None:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+
+    def _ensure_mic_monitor_background_task(self) -> None:
+        self._ensure_runtime_state()
+        task = getattr(self, "_mic_monitor_background_task", None)
+        if task and not task.done():
+            return
+        if not self.enable_mic_monitor or not self.running:
+            return
+        task = self._safe_create_task(self._mic_monitor_task(), name="mic_monitor")
+        self._mic_monitor_background_task = task
+        if task not in self.background_tasks:
+            self.background_tasks.append(task)
+
+    def _stop_mic_monitor_background_task(self) -> None:
+        task = getattr(self, "_mic_monitor_background_task", None)
+        if task and not task.done():
+            task.cancel()
+        self._mic_monitor_background_task = None
 
     async def _mic_monitor_task(self):
         """后台麦克风监听任务。"""

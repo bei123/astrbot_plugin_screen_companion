@@ -4,29 +4,23 @@ astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能
 
 基本功能已经完善，现已转入维护阶段，如果喜欢的话请给个 star 吧。
 
-已知问题：
-- 在未手动结束自动化任务时重载插件，可能会导致原有的自动化任务持续进行且无法结束，如遇该情况请重启astrbot以免token消耗。
-- 在群聊环境中能被非管理员触发识屏，请先不要在群聊环境中使用以免隐私信息泄露。
-
-注：为避免插件更新导致需要重新安装 `ffmpeg`，现于2.7.1版本已将 `ffmpeg.exe` 从插件本体文件夹移动到插件数据目录的 `bin` 文件夹中，同时原位置依旧兼容。
-
 ## 版本
 
-当前版本：`2.7.1`
+当前版本：`2.7.2`
 
 ## 主要功能
 
 - 自动识屏：按间隔和概率观察当前屏幕，并在合适的时候主动回复。
 - 即时识屏：`/kp` 固定截图识别，`/kpr` 固定录屏识别。
 - 录屏轻量采样：录屏模式会先抽取关键帧，必要时再回退到完整视频分析。
-- 主动陪伴：支持变化感知、相似回复冷却、同窗口频率限制和手动发言后暂缓打断。
+- 主动陪伴：支持变化感知、相似回复冷却、同窗口频率限制、手动发言后暂缓打断，以及敏感界面沉默、情绪短缓存和只观察不发言。
 - 长期记忆：保留窗口、场景、情节记忆和重复关注点，后续回复会优先召回相关记忆。
 - 今日日记：自动生成自然语言日记，并同步生成结构化摘要。
 - WebUI：查看运行状态、观察记录、活动统计、日记、记忆和可解释识屏信息。
 
 ## 运行环境
 
-推荐在带图形桌面的环境中运行：
+远程识屏易产生隐私问题，仅推荐在本地部署的情况下使用，推荐在带图形桌面的环境中运行：
 
 - Windows
 - macOS
@@ -59,12 +53,11 @@ pip install -r requirements.txt
 
 ## ffmpeg 安装
 
-录屏模式必须安装 `ffmpeg`。如果没有 `ffmpeg`，插件仍可使用截图模式，但无法使用 `/kpr` 和录屏识屏。
+录屏模式必须安装 `ffmpeg`用于后台录制屏幕处理视频。如果没有 `ffmpeg`，插件仍可使用截图模式，但无法使用 `/kpr` 和录屏识屏。
 
 ### Windows 快速配置
 
-0. 尝试从该插件的release中下载ffmpeg.exe。
-1. 或者从 [Gyan FFmpeg Builds](https://www.gyan.dev/ffmpeg/builds/) 下载 `ffmpeg-release-essentials.zip`。
+1. 从 [Gyan FFmpeg Builds](https://www.gyan.dev/ffmpeg/builds/) 下载 `ffmpeg-release-essentials.zip`。
 2. 解压后找到 `ffmpeg.exe`，通常位于 `bin\ffmpeg.exe`。
 3. 在 AstrBot 中执行：
 
@@ -74,6 +67,8 @@ pip install -r requirements.txt
 
 插件会自动把 `ffmpeg.exe` 复制到插件数据目录的 `bin` 文件夹。
 Windows 默认路径通常是 `C:\Users\你的用户名\.astrbot\data\plugin_data\astrbot_plugin_screen_companion\bin\ffmpeg.exe`。
+注：为避免插件更新导致需要重新安装 `ffmpeg`，现已于2.7.1版本已将 `ffmpeg.exe` 从插件本体文件夹移动到插件数据目录的 `bin` 文件夹中，原位置依旧兼容。
+
 
 ### 手动配置
 
@@ -136,39 +131,41 @@ sudo yum install ffmpeg
 
 相同功能的旧别名已经不再作为主要入口保留，下面只列推荐使用的简化版指令。
 
+**注意**：以下所有指令仅管理员可使用：
+
 ### 即时识屏
 
-- `/kp`：立即截图识别。
-- `/kpr`：立即录屏识别。
-- `/kps`：保存当前截图。
+- `/kp`：立即截图识别（仅管理员）。
+- `/kpr`：立即录屏识别（仅管理员）。
+- `/kps`：切换自动观察运行状态（仅管理员）。
 
 ### 自动观察与状态
 
-- `/kpi start`：启动自动观察。
-- `/kpi stop`：停止自动观察。
-- `/kpi status`：查看自检、运行状态、主动目标、识屏链路和环境检查。
-- `/kpi list`：查看当前任务列表。
-- `/kpi webui`：查看 WebUI 状态和访问地址。
-- `/kpi webui start`：启动 WebUI。
-- `/kpi webui stop`：停止 WebUI。
+- `/kpi start`：启动自动观察（仅管理员）。
+- `/kpi stop`：停止自动观察（仅管理员）。
+- `/kpi status`：查看自检、运行状态、主动目标、识屏链路和环境检查（仅管理员）。
+- `/kpi list`：查看当前任务列表（仅管理员）。
+- `/kpi webui`：查看 WebUI 状态和访问地址（仅管理员）。
+- `/kpi webui start`：启动 WebUI（仅管理员）。
+- `/kpi webui stop`：停止 WebUI（仅管理员）。
 
 ### 预设与日记
 
-- `/kpi p`：查看预设列表。
-- `/kpi ys [序号]`：使用指定预设；不带参数时显示预设列表。
-- `/kpi y [内容]`：记录一条观察。
-- `/kpi add [名称] [间隔秒] [概率]`：新增预设。
-- `/kpi d [日期]`：查看指定日期日记；凌晨两点前默认查看前一天。
-- `/kpi cd [日期]`：补写指定日期日记；凌晨两点前默认补写前一天。
+- `/kpi p`：查看预设列表（仅管理员）。
+- `/kpi ys [序号]`：使用指定预设；不带参数时显示预设列表（仅管理员）。
+- `/kpi y [内容]`：记录一条观察（仅管理员）。
+- `/kpi add [名称] [间隔秒] [概率]`：新增预设（仅管理员）。
+- `/kpi d [日期]`：查看指定日期日记；凌晨两点前默认查看前一天（仅管理员）。
+- `/kpi cd [日期]`：补写指定日期日记；凌晨两点前默认补写前一天（仅管理员）。
 
 ### 配置与调试
 
-- `/kpi ffmpeg`：查看当前 `ffmpeg` 状态。
-- `/kpi ffmpeg [路径]`：设置 `ffmpeg` 路径并复制到插件数据目录。
-- `/kpi recent`：查看最近观察。
-- `/kpi correct [内容]`：补充纠正信息。
-- `/kpi preference [类别] [内容]`：记录偏好。
-- `/kpi debug [on|off]`：切换调试模式。
+- `/kpi ffmpeg`：查看当前 `ffmpeg` 状态（仅管理员）。
+- `/kpi ffmpeg [路径]`：设置 `ffmpeg` 路径并复制到插件数据目录（仅管理员）。
+- `/kpi recent`：查看最近观察（仅管理员）。
+- `/kpi correct [内容]`：补充纠正信息（仅管理员）。
+- `/kpi preference [类别] [内容]`：记录偏好（仅管理员）。
+- `/kpi debug [on|off]`：切换调试模式（仅管理员）。
 
 ## WebUI 能看什么
 

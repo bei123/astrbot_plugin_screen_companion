@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -17,7 +17,7 @@
                 <p class="hero-text">在一个更轻松的界面里查看今天的日记、最近的观察记录，以及长期积累下来的记忆偏好。</p>
                 <div class="hero-status">
                     <span class="status-dot" id="statusDot"></span>
-                    <span id="statusText">正在连接 WebUI 服务…</span>
+                    <span id="statusText">正在连接 WebUI 服务...</span>
                 </div>
             </div>
             <div class="hero-actions">
@@ -37,23 +37,56 @@
         </header>
 
         <section class="overview-grid">
-            <article class="panel stat-card">
-                <p class="panel-label">日记数量</p>
+            <article class="panel stat-card stat-card--diary">
+                <div class="stat-card-top">
+                    <span class="stat-card-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M7 4.5h9.5a2 2 0 0 1 2 2V19a.5.5 0 0 1-.8.4A4.9 4.9 0 0 0 14.8 18H7a2 2 0 0 0-2 2V6.5a2 2 0 0 1 2-2Z"></path>
+                            <path d="M7 4.5v13.4"></path>
+                            <path d="M9.5 8.5h6"></path>
+                            <path d="M9.5 11.5h6"></path>
+                        </svg>
+                    </span>
+                    <p class="panel-label">日记数量</p>
+                </div>
                 <strong id="diaryCount">0</strong>
                 <span>已归档的每日记录</span>
             </article>
-            <article class="panel stat-card">
-                <p class="panel-label">观察记录</p>
+            <article class="panel stat-card stat-card--observation">
+                <div class="stat-card-top">
+                    <span class="stat-card-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M2.5 12s3.6-5.5 9.5-5.5S21.5 12 21.5 12 17.9 17.5 12 17.5 2.5 12 2.5 12Z"></path>
+                            <circle cx="12" cy="12" r="2.7"></circle>
+                        </svg>
+                    </span>
+                    <p class="panel-label">观察记录</p>
+                </div>
                 <strong id="observationCount">0</strong>
                 <span>当前可浏览的观察片段</span>
             </article>
-            <article class="panel stat-card">
-                <p class="panel-label">长期记忆</p>
+            <article class="panel stat-card stat-card--memory">
+                <div class="stat-card-top">
+                    <span class="stat-card-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M12 3.5 14.2 8l4.8.7-3.5 3.4.8 4.9L12 14.8 7.7 17l.8-4.9L5 8.7 9.8 8 12 3.5Z"></path>
+                        </svg>
+                    </span>
+                    <p class="panel-label">长期记忆</p>
+                </div>
                 <strong id="memoryCount">0</strong>
                 <span>来自应用、场景与偏好的积累</span>
             </article>
-            <article class="panel stat-card">
-                <p class="panel-label">最后更新</p>
+            <article class="panel stat-card stat-card--updated">
+                <div class="stat-card-top">
+                    <span class="stat-card-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24">
+                            <circle cx="12" cy="12" r="8.5"></circle>
+                            <path d="M12 7.8v4.7l3 1.9"></path>
+                        </svg>
+                    </span>
+                    <p class="panel-label">最后更新</p>
+                </div>
                 <strong id="lastUpdated">--</strong>
                 <span>本页数据刷新时间</span>
             </article>
@@ -178,7 +211,7 @@
                     <div class="toolbar">
                         <label class="field compact-field settings-search">
                             <span>快速筛选</span>
-                            <input id="settingsSearchInput" type="search" placeholder="搜索配置名、说明或提示词">
+                            <input id="settingsSearchInput" type="search" placeholder="搜索配置名、说明或提示">
                         </label>
                     </div>
                 </div>
@@ -327,10 +360,17 @@
                         <div class="activity-stats" id="totalActivityStats"></div>
                     </article>
                 </div>
+                <article class="panel activity-chart-panel">
+                    <div class="panel-header">
+                        <h3>时间配比图</h3>
+                        <span class="panel-subtle">工作、摸鱼、其他的占比一眼看清</span>
+                    </div>
+                    <div class="activity-chart-stack" id="activityCharts"></div>
+                </article>
                 <article class="panel">
                     <div class="panel-header">
                         <h3>最近活动</h3>
-                        <span class="panel-subtle">最近10条活动记录</span>
+                        <span class="panel-subtle">最近 20 条活动记录</span>
                     </div>
                     <div class="list-stack" id="recentActivities"></div>
                 </article>
@@ -362,3 +402,4 @@
     <script src="/web/app.js"></script>
 </body>
 </html>
+

@@ -250,6 +250,15 @@
       "use_external_vision": true
     }
   },
+  "enable_privacy_guard": {
+    "description": "开启隐私输出保护",
+    "type": "bool",
+    "hint": "默认开启。开启后会向识屏提示词注入隐私保护要求，尽量避免 bot 直接复述屏幕中的敏感信息。",
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
   "user_preferences": {
     "description": "用户偏好设置",
     "type": "text",

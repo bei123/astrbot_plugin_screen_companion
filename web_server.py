@@ -2023,7 +2023,10 @@ class WebServer:
             if provider:
                 try:
                     response = await asyncio.wait_for(
-                        provider.text_chat(prompt=interaction_prompt, system_prompt=system_prompt),
+                        provider.text_chat(
+                            prompt=self.plugin._append_privacy_guard_prompt(interaction_prompt),
+                            system_prompt=system_prompt
+                        ),
                         timeout=60.0,
                     )
                     if response and hasattr(response, "completion_text") and response.completion_text:
