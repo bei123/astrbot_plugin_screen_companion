@@ -117,7 +117,7 @@
   "recording_fps": {
     "description": "录屏帧率",
     "type": "float",
-    "hint": "录屏模式下每秒采样的帧数。支持小数，如 0.5 代表 2 秒/帧。非精细操作建议保持在默认值1。",
+    "hint": "录屏模式下每秒采样的帧数。支持小数，最小值为0.01，最大值为30，如 0.5 代表 2 秒/帧。非精细操作建议保持在默认值1。",
     "default": 1,
     "min": 0.01,
     "max": 30,
@@ -152,7 +152,7 @@
     "description": "Bot 近视程度",
     "type": "int",
     "hint": "值越高看得越清楚（0-100），建议保持在85+",
-    "default": 85,
+    "default": 100,
     "min": 1,
     "max": 100,
     "condition": {
@@ -453,6 +453,24 @@
     "condition": {
       "enabled": true,
       "enable_mic_monitor": true
+    }
+  },
+  "memory_threshold": {
+    "description": "内存阈值",
+    "type": "int",
+    "hint": "当内存使用率超过此阈值时，系统会提示用户注意资源使用情况，范围 0-100。",
+    "default": 80,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "battery_threshold": {
+    "description": "电量阈值",
+    "type": "int",
+    "hint": "当设备电量低于此阈值时，会提醒用户保存进度，范围 0-100。",
+    "default": 20,
+    "condition": {
+      "enabled": true
     }
   },
   "admin_qq": {

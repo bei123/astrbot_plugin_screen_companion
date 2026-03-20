@@ -332,6 +332,8 @@ class ScreenCompanion(Star):
         self.enable_mic_monitor = self._coerce_bool(self.plugin_config.enable_mic_monitor)
         self.mic_threshold = self.plugin_config.mic_threshold
         self.mic_check_interval = self.plugin_config.mic_check_interval
+        self.memory_threshold = self.plugin_config.memory_threshold
+        self.battery_threshold = self.plugin_config.battery_threshold
         self.admin_qq = self.plugin_config.admin_qq
         self.proactive_target = self.plugin_config.proactive_target
         self.save_local = self._coerce_bool(self.plugin_config.save_local)
@@ -5113,7 +5115,17 @@ class ScreenCompanion(Star):
         return preview[: max(0, limit - 1)] + "…"
 
     def _normalize_record_text(self, text: str) -> str:
-        return str(text or "").strip().lower()
+        import re
+
+        text = str(text or "").strip().lower()
+        if not text:
+            return ""
+        text = re.sub(r"```[\s\S]*?```", " ", text)
+        text = re.sub(r"`[^`]+`", " ", text)
+        text = re.sub(r"[*#>\-_=~]+", " ", text)
+        text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
 
     def _get_recent_reply_openings(self, interaction_key: str) -> list[str]:
         self._ensure_runtime_state()
@@ -7374,18 +7386,19 @@ class ScreenCompanion(Star):
             cpu_percent = psutil.cpu_percent(interval=1)
             memory = psutil.virtual_memory()
             memory_percent = memory.percent
-            
-            # 检查电池状态（部分设备/系统可能不支持）
+
             battery = None
             if hasattr(psutil, "sensors_battery"):
                 try:
                     battery = psutil.sensors_battery()
                 except Exception as battery_error:
                     logger.debug(f"获取电池状态失败: {battery_error}")
-            if battery and getattr(battery, "percent", None) is not None and battery.percent < 20:
+            battery_threshold = getattr(self, "battery_threshold", 20)
+            if battery and getattr(battery, "percent", None) is not None and battery.percent < battery_threshold:
                 system_prompt += " 当前设备电量偏低，若建议涉及长时间操作，请顺手提醒保存进度。"
 
-            if cpu_percent > 80 or memory_percent > 80:
+            memory_threshold = getattr(self, "memory_threshold", 80)
+            if cpu_percent > 80 or memory_percent > memory_threshold:
                 if system_prompt:
                     system_prompt += " "
                 system_prompt += " 当前系统负载较高，请避免建议用户同时做太重的操作。"
@@ -7399,7 +7412,7 @@ class ScreenCompanion(Star):
             logger.debug(f"系统状态检测失败: {e}")
         return system_prompt, system_high_load
 
-    async def _get_weather_prompt(self) -> str:
+    async def _get_weather_prompt(self, target_date: datetime.date = None) -> str:
         """获取天气提示词。"""
         weather_prompt = ""
         weather_api_key = self.weather_api_key
@@ -7410,19 +7423,42 @@ class ScreenCompanion(Star):
                 import aiohttp
 
                 async with aiohttp.ClientSession() as session:
-                    url = f"http://api.openweathermap.org/data/2.5/weather?q={weather_city}&appid={weather_api_key}&units=metric&lang=zh_cn"
+                    if target_date:
+                        # 获取历史天气
+                        timestamp = int(datetime.datetime.combine(target_date, datetime.datetime.min.time()).timestamp())
+                        url = f"http://api.openweathermap.org/data/2.5/onecall/timemachine?lat={self.weather_lat}&lon={self.weather_lon}&dt={timestamp}&appid={weather_api_key}&units=metric&lang=zh_cn"
+                    else:
+                        # 获取当前天气
+                        url = f"http://api.openweathermap.org/data/2.5/weather?q={weather_city}&appid={weather_api_key}&units=metric&lang=zh_cn"
+                    
                     async with session.get(url) as response:
                         if response.status == 200:
                             weather_data = await response.json()
-                            weather_main = weather_data.get("weather", [{}])[0].get(
-                                "main", ""
-                            )
-                            weather_desc = weather_data.get("weather", [{}])[0].get(
-                                "description", ""
-                            )
-                            temp = weather_data.get("main", {}).get("temp", 0)
+                            
+                            if target_date:
+                                # 解析历史天气数据
+                                weather_main = weather_data.get("current", {}).get("weather", [{}])[0].get(
+                                    "main", ""
+                                )
+                                weather_desc = weather_data.get("current", {}).get("weather", [{}])[0].get(
+                                    "description", ""
+                                )
+                                temp = weather_data.get("current", {}).get("temp", 0)
+                            else:
+                                # 解析当前天气数据
+                                weather_main = weather_data.get("weather", [{}])[0].get(
+                                    "main", ""
+                                )
+                                weather_desc = weather_data.get("weather", [{}])[0].get(
+                                    "description", ""
+                                )
+                                temp = weather_data.get("main", {}).get("temp", 0)
 
-                            weather_prompt = f"当前天气 {weather_desc}，约 {temp}°C。"
+                            if target_date:
+                                weather_prompt = f"当日天气 {weather_desc}，约 {temp}°C。"
+                            else:
+                                weather_prompt = f"当前天气 {weather_desc}，约 {temp}°C。"
+                            
                             logger.info(f"天气信息获取成功: {weather_prompt}")
                         else:
                             logger.debug(f"获取天气信息失败: {response.status}")
@@ -7842,6 +7878,15 @@ class ScreenCompanion(Star):
                     prompt_parts.append(f"天气提示：{weather_prompt}")
                 if system_status_prompt:
                     prompt_parts.append(f"系统状态：{system_status_prompt}")
+                if not effective_use_external_vision and analysis_trace["trigger_reason"]:
+                    trigger_reason = analysis_trace["trigger_reason"]
+                    prompt_parts.append(f"触发背景：{trigger_reason}")
+                    if "窗口变化" in trigger_reason or "提升" in trigger_reason:
+                        prompt_parts.append("场景重点：用户刚切换到新应用或新内容，请先确认当前窗口的实际内容再给出建议。")
+                    elif "停留较久" in trigger_reason or "低频" in trigger_reason:
+                        prompt_parts.append("场景重点：用户可能正处于深度专注状态，建议以轻柔陪伴为主，避免打断。")
+                    elif "变化不大" in trigger_reason or "降低" in trigger_reason:
+                        prompt_parts.append("场景重点：当前画面相对稳定，建议只提供最有价值的1条简短提醒即可。")
 
             prompt_parts.append(f"语气控制：{sampling_profile['tone_instruction']}")
 
@@ -9068,6 +9113,20 @@ class ScreenCompanion(Star):
             weather_info = ""
             observation_text = ""
             
+            # 筛选当天的观察记录
+            target_date_str = target_date.strftime("%Y-%m-%d")
+            day_observations = []
+            for obs in self.observations:
+                if obs.get("timestamp", "").startswith(target_date_str):
+                    day_observations.append(obs)
+            
+            # 准备观察记录文本
+            if day_observations:
+                observation_text = "当天观察记录：\n"
+                for i, obs in enumerate(day_observations, 1):
+                    observation_text += f"{i}. 场景：{obs.get('scene', '未知')} - {obs.get('description', '')}\n"
+                observation_text += "\n"
+            
             completion_prompt = (
                 f"请补写 {target_date.strftime('%Y年%m月%d日')} 的今日日记。\n"
                 "要求：\n"
@@ -9077,6 +9136,11 @@ class ScreenCompanion(Star):
                 "4. 保留真实感，不要写成空泛鸡汤，也不要重复标题和日期。\n"
                 "5. 字数控制在 220 到 420 字。\n"
             )
+            
+            if day_observations:
+                completion_prompt += f"\n当天观察记录：\n"
+                for obs in day_observations:
+                    completion_prompt += f"- {obs.get('scene', '未知')}：{obs.get('description', '')}\n"
 
 
             reference_days = []
@@ -9120,7 +9184,7 @@ class ScreenCompanion(Star):
 
                 # 尝试获取天气信息
                 try:
-                    weather_info = await self._get_weather_prompt()
+                    weather_info = await self._get_weather_prompt(target_date)
                 except Exception as e:
                     logger.debug(f"获取天气信息失败: {e}")
 
@@ -10066,7 +10130,7 @@ class ScreenCompanion(Star):
                                         capture_context,
                                         session=event,
                                         active_window_title=active_window_title,
-                                        custom_prompt="我听到你刚才声音有点大，像是发生了什么，帮你看看现在的情况。",
+                                        custom_prompt="刚才那边好像有点动静？让我看看你现在在做什么呢。",
                                         task_id=temp_task_id,
                                     ),
                                     timeout=self._get_screen_analysis_timeout(

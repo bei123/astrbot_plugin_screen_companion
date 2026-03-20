@@ -417,8 +417,8 @@ function createSettingsInput(fieldKey, meta, value) {
         const select = document.createElement("select");
         select.dataset.settingKey = fieldKey;
         select.innerHTML = `
-            <option value="true">开启</option>
-            <option value="false">关闭</option>
+            <option value="true">寮€鍚?</option>
+            <option value="false">鍏抽棴</option>
         `;
         select.value = value ? "true" : "false";
         return select;
@@ -445,6 +445,13 @@ function createSettingsInput(fieldKey, meta, value) {
             if (meta.min !== undefined) input.min = String(meta.min);
             if (meta.max !== undefined) input.max = String(meta.max);
             input.step = "1";
+        }
+    }
+
+    if (meta.type === "password") {
+        input.autocomplete = "new-password";
+        if (meta.sensitive && meta.configured) {
+            input.placeholder = "Leave blank to keep current value";
         }
     }
 
@@ -1380,7 +1387,7 @@ function renderMemories() {
                 <div>
                     <div class="memory-header">
                         <strong>${escapeHtml(item.title)}</strong>
-                        <span class="tag">浼樺厛绾?${escapeHtml(item.priority ?? 0)}</span>
+                        <span class="tag">优先级${escapeHtml(item.priority ?? 0)}</span>
                     </div>
                     <p class="memory-content">${escapeHtml(item.summary)}</p>
                     <p class="memory-meta">${escapeHtml(item.meta || "")}</p>
@@ -1624,6 +1631,9 @@ function collectVisibleSettingsUpdates() {
     inputs.forEach((input) => {
         const key = input.dataset.settingKey;
         const meta = getSettingMeta(key);
+        if (meta.sensitive && !String(input.value || "").trim()) {
+            return;
+        }
         updates[key] = readSettingInputValue(input, meta);
     });
     return updates;

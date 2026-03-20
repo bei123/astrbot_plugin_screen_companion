@@ -79,6 +79,8 @@ class PluginConfig(BaseModel):
     enable_mic_monitor: bool = False
     mic_threshold: int = 60
     mic_check_interval: int = 5
+    memory_threshold: int = 80
+    battery_threshold: int = 20
     admin_qq: str = ""
     proactive_target: str = ""
     save_local: bool = True
@@ -192,6 +194,20 @@ class PluginConfig(BaseModel):
     def validate_mic_check_interval(cls, v):
         if v < 1:
             raise ValueError('mic_check_interval 不能小于 1 秒')
+        return v
+
+    @field_validator('memory_threshold')
+    @classmethod
+    def validate_memory_threshold(cls, v):
+        if v < 0 or v > 100:
+            raise ValueError('memory_threshold 必须在 0-100 之间')
+        return v
+
+    @field_validator('battery_threshold')
+    @classmethod
+    def validate_battery_threshold(cls, v):
+        if v < 0 or v > 100:
+            raise ValueError('battery_threshold 必须在 0-100 之间')
         return v
 
     @field_validator('window_companion_check_interval')

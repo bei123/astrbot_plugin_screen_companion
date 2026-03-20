@@ -20,6 +20,14 @@ class WebServer:
     SESSION_MAX_COUNT = 1000
     START_RETRY_COUNT = 3
     START_RETRY_DELAY = 0.5
+    SENSITIVE_SETTINGS_KEYS = frozenset(
+        {
+            "vision_api_key",
+            "vision_api_key_backup",
+            "weather_api_key",
+            "webui.password",
+        }
+    )
 
     def __init__(self, plugin: Any, host: str = "0.0.0.0", port: int = 6314):
         self.plugin = plugin
@@ -111,26 +119,20 @@ class WebServer:
             return True
 
     def _get_expected_secret(self) -> str:
-        # 尝试从配置获取
         password = ""
         try:
             password = str(self.plugin.plugin_config.webui.password or "").strip()
         except Exception:
             password = ""
 
-        # 如果密码为空，即使认证开关开启，也视为未启用认证
         if not password:
             return ""
-
-        # 检查认证是否启用
         if not self._is_auth_enabled():
             return ""
-
         return password
 
     def _get_session_timeout(self) -> int:
         timeout = 3600
-        # Try reading the timeout from config
         try:
             timeout = int(self.plugin.plugin_config.webui.session_timeout or 3600)
         except Exception:
@@ -140,6 +142,28 @@ class WebServer:
             timeout = 3600
         return timeout
 
+    @staticmethod
+    def _is_public_path(path: str) -> bool:
+        return path in {
+            "/",
+            "/index.html",
+            "/auth/info",
+            "/auth/login",
+            "/auth/logout",
+            "/api/config",
+            "/api/health",
+        } or path == "/web" or path.startswith("/web/")
+
+    @classmethod
+    def _is_sensitive_setting_key(cls, key: str) -> bool:
+        return str(key or "") in cls.SENSITIVE_SETTINGS_KEYS
+
+    @classmethod
+    def _should_preserve_sensitive_value(cls, key: str, raw_value: Any) -> bool:
+        if not cls._is_sensitive_setting_key(key):
+            return False
+        return not str(raw_value or "").strip()
+
     async def _auth_middleware(self, app: web.Application, handler):
         async def middleware_handler(request: web.Request):
             if request.method == "OPTIONS":
@@ -147,59 +171,39 @@ class WebServer:
 
             path = request.path or "/"
             expected = self._get_expected_secret()
-            
-            # 检查是否是外部API调用
+
             if path in ("/api/analyze", "/api/analyze/base64"):
                 if not self.plugin.webui_allow_external_api:
-                    return WebServer._err("外部 API 未启用", 403)
-                
-                # 检查API密钥
+                    return WebServer._err("External API disabled", 403)
+
                 if expected:
-                    # 从header获取API密钥
                     api_key = request.headers.get("X-API-Key", "")
                     if not api_key or api_key != expected:
                         return WebServer._err("Unauthorized", 401)
                 return await handler(request)
-            
-            # 其他API需要认证
+
             if not expected:
                 return await handler(request)
 
-            if (
-                path in ("/", "/index.html")
-                or path.startswith("/web")
-                or path in ("/auth/info", "/auth/login", "/auth/logout")
-                or path == "/api/config"  # 允许无需认证访问基本配置信息
-                or path.startswith("/api/runtime")  # 允许无需认证访问运行时信息
-                or path == "/api/health"  # 允许无需认证访问健康检查
-                or path == "/api/settings"  # 允许无需认证访问设置信息
-                or path.startswith("/api/diaries")  # 允许无需认证访问日记列表
-                or path.startswith("/api/diary/")  # 允许无需认证访问单日日记
-                or path.startswith("/api/observations")  # 允许无需认证访问观察记录
-                or path.startswith("/api/memories")  # 允许无需认证访问记忆
-                or path.startswith("/api/windows")  # 允许无需认证访问窗口列表
-                or path.startswith("/api/dashboard")  # 允许无需认证访问统计面板
-            ):
+            if self._is_public_path(path):
                 return await handler(request)
 
             sid = str(request.cookies.get(self._cookie_name, "") or "").strip()
             now = time.time()
 
-            # Periodically clean expired sessions
             if now - self._last_session_cleanup > self._session_cleanup_interval:
                 expired = [k for k, v in self._sessions.items() if v < now]
                 for k in expired:
                     self._sessions.pop(k, None)
                 self._last_session_cleanup = now
 
-                # Trim oldest sessions if the session pool grows too large
                 if len(self._sessions) > self.SESSION_MAX_COUNT:
                     sorted_sessions = sorted(self._sessions.items(), key=lambda x: x[1])
                     to_remove = len(self._sessions) - self.SESSION_MAX_COUNT // 2
                     for k, _ in sorted_sessions[:to_remove]:
                         self._sessions.pop(k, None)
                     logger.warning(
-                        f"Session 数量超过上限 {self.SESSION_MAX_COUNT}，已清理 {to_remove} 个最旧的 session"
+                        f"Session 鏁伴噺瓒呰繃涓婇檺 {self.SESSION_MAX_COUNT}锛屽凡娓呯悊 {to_remove} 涓渶鏃х殑 session"
                     )
 
             exp = self._sessions.get(sid)
@@ -706,7 +710,7 @@ class WebServer:
         observations = []
         for index, obs in enumerate((getattr(self.plugin, "observations", []) or []).copy()):
             scene_name = str(obs.get("scene", "") or "").strip()
-            if scene_name.lower() in {"unknown", "none", "null"} or scene_name == "鏈煡":
+            if scene_name.lower() in {"unknown", "none", "null"} or scene_name == "未知":
                 scene_name = ""
 
             active_window = str(
@@ -960,8 +964,8 @@ class WebServer:
         """Return basic config metadata."""
         try:
             return self._ok({
-            "version": "2.7.0",
-            "plugin_version": "2.7.0"
+            "version": "2.7.3",
+            "plugin_version": "2.7.3"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -980,7 +984,7 @@ class WebServer:
             if isinstance(schema, dict):
                 return schema
         except Exception as e:
-            logger.error(f"璇诲彇閰嶇疆 schema 澶辫触: {e}")
+            logger.error(f"读取配置 schema 失败: {e}")
         return {}
 
     def _build_settings_payload(self) -> dict[str, Any]:
@@ -990,6 +994,8 @@ class WebServer:
         for key in schema.keys():
             if key == "screen_recognition_mode":
                 values[key] = bool(self.plugin._use_screen_recording_mode())
+            elif self._is_sensitive_setting_key(key):
+                values[key] = ""
             else:
                 values[key] = getattr(self.plugin, key, None)
 
@@ -1001,11 +1007,29 @@ class WebServer:
                     "webui.host": getattr(webui_config, "host", "0.0.0.0"),
                     "webui.port": int(getattr(webui_config, "port", 6314) or 6314),
                     "webui.auth_enabled": bool(getattr(webui_config, "auth_enabled", True)),
-                    "webui.password": getattr(webui_config, "password", ""),
+                    "webui.password": "",
                     "webui.session_timeout": int(getattr(webui_config, "session_timeout", 3600) or 3600),
                     "webui.allow_external_api": bool(getattr(webui_config, "allow_external_api", False)),
                 }
             )
+
+        for key in tuple(schema.keys()) + ("webui.password",):
+            if not self._is_sensitive_setting_key(key):
+                continue
+
+            if key.startswith("webui."):
+                attr_name = key.split(".", 1)[1]
+                actual_value = getattr(webui_config, attr_name, "") if webui_config else ""
+            else:
+                actual_value = getattr(self.plugin, key, "")
+
+            field_meta = schema.get(key)
+            if isinstance(field_meta, dict):
+                schema[key] = {
+                    **field_meta,
+                    "sensitive": True,
+                    "configured": bool(str(actual_value or "").strip()),
+                }
 
         groups = [
             {
@@ -1092,6 +1116,8 @@ class WebServer:
                     "enable_mic_monitor",
                     "mic_threshold",
                     "mic_check_interval",
+                    "memory_threshold",
+                    "battery_threshold",
                     "weather_api_key",
                     "weather_city",
                     "admin_qq",
@@ -1166,6 +1192,12 @@ class WebServer:
         }
 
         schema.update(webui_schema)
+        if "webui.password" in schema:
+            schema["webui.password"] = {
+                **schema["webui.password"],
+                "sensitive": True,
+                "configured": bool(str(getattr(webui_config, "password", "") if webui_config else "").strip()),
+            }
         schema.update(
             {
                 "enable_window_companion": {
@@ -1261,6 +1293,8 @@ class WebServer:
             for key, raw_value in provided_updates.items():
                 if key not in schema:
                     continue
+                if self._should_preserve_sensitive_value(key, raw_value):
+                    continue
 
                 coerced = self._coerce_setting_value(key, schema[key], raw_value)
                 if key.startswith("webui."):
@@ -1285,8 +1319,8 @@ class WebServer:
             {
                 "status": "ok",
                 "service": "screen-companion-webui",
-            "version": "2.7.0",
-            "plugin_version": "2.7.0",
+            "version": "2.7.3",
+            "plugin_version": "2.7.3",
                 "host": self.host,
                 "port": self.port,
                 "auth_enabled": bool(self._get_expected_secret()),
@@ -1336,6 +1370,9 @@ class WebServer:
             "enable_diary": self._plugin_bool("enable_diary"),
             "enable_learning": self._plugin_bool("enable_learning"),
             "enable_mic_monitor": self._plugin_bool("enable_mic_monitor"),
+            "mic_threshold": getattr(self.plugin, "mic_threshold", 60),
+            "memory_threshold": getattr(self.plugin, "memory_threshold", 80),
+            "battery_threshold": getattr(self.plugin, "battery_threshold", 20),
             "debug": self._plugin_bool("debug"),
             "save_local": self._plugin_bool("save_local"),
             "screen_recognition_mode": bool(self.plugin._use_screen_recording_mode()),
@@ -1992,7 +2029,7 @@ class WebServer:
             return self._ok(result)
             
         except Exception as e:
-            logger.error(f"鍥剧墖鍒嗘瀽澶辫触: {e}")
+            logger.error(f"图片分析失败: {e}")
             return self._err(str(e))
 
     async def _analyze_image_logic(self, image_bytes: bytes, custom_prompt: str = None) -> dict:
