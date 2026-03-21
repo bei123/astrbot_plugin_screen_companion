@@ -353,8 +353,12 @@ class PluginConfig(BaseModel):
         extra = "ignore"
         arbitrary_types_allowed = True
 
-    def __init__(self, config: AstrBotConfig | None, context: Context | None = None):
-        # 1. 初始化 Pydantic 模型
+    def __init__(
+        self,
+        config: AstrBotConfig | dict[str, Any] | None,
+        context: Context | None = None,
+    ) -> None:
+        # 1. 初始化 Pydantic 模型（Star 注入多为 dict；回写时也可能是 AstrBotConfig）
         initial_data = config if config else {}
         super().__init__(**initial_data)
 

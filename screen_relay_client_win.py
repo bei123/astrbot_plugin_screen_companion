@@ -4,6 +4,12 @@
 屏幕伴侣 Windows 端推送程序（图形界面）。
 将本机屏幕截图与可选麦克风音量推送到 Linux 服务器上的「屏幕伴侣」插件。
 
+与插件侧约定（无需随对话/配置项改动而改本脚本）:
+  - 服务器上插件须将「截图来源」设为 remote，并启动中继服务（见插件 screen_relay_* 配置）。
+  - 本程序填写的「端口」须与插件配置 screen_relay_port 一致（默认 8765）。
+  - 二进制帧格式与 main._run_screen_relay_server 一致：无麦 4 字节大端 title 长度 + 标题 UTF-8 +
+    4 字节大端 JPEG 长度 + 数据；有麦时帧头 \\xFF\\x01，帧尾 1 字节音量；\\xFE + 1 字节为仅音量更新。
+
 依赖（Windows）:
   pip install pyautogui Pillow pygetwindow
   启用麦克风时: pip install pyaudio numpy
@@ -97,6 +103,11 @@ def run_gui():
     var_port = tk.StringVar(value="8765")
     entry_port = ttk.Entry(frame_cfg, textvariable=var_port, width=6)
     entry_port.grid(row=row, column=3, sticky=tk.W, pady=2)
+    ttk.Label(
+        frame_cfg,
+        text="(与插件 screen_relay_port 一致)",
+        font=("TkDefaultFont", 8),
+    ).grid(row=row, column=4, sticky=tk.W, padx=(6, 0), pady=2)
     row += 1
 
     ttk.Label(frame_cfg, text="截图间隔(秒):").grid(row=row, column=0, sticky=tk.W, padx=(0, 4), pady=2)
@@ -352,7 +363,10 @@ def run_gui():
     frame_log.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
     log_text = scrolledtext.ScrolledText(frame_log, height=8, state=tk.DISABLED, wrap=tk.WORD, font=("Consolas", 9))
     log_text.pack(fill=tk.BOTH, expand=True)
-    log("就绪。填写服务器地址与端口后点击「开始推送」。")
+    log(
+        "就绪。地址填运行 AstrBot 的机器 IP；端口与插件「screen_relay_port」一致（默认 8765）；"
+        "插件需开启截图来源 remote。"
+    )
 
     def on_closing():
         if btn_stop.cget("state") != tk.DISABLED:
