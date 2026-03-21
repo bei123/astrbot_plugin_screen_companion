@@ -73,7 +73,7 @@ class PluginConfig(BaseModel):
     diary_auto_recall: bool = False
     diary_recall_time: int = 30
     diary_send_as_image: bool = False
-    diary_generation_prompt: str = "请根据今天的观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。不要只是对观察记录的生硬总结，而是要融合你的经历和情感，生成一个更个人化的日记。请字数控制在400字左右。"
+    diary_generation_prompt: str = "请根据今天的观察记录，写一段更像私人日记的感想。语气要自然、贴身、不过度点评，不要写成工作复盘或命令式建议，尽量保留一点当下的情绪和陪伴感。"
     weather_api_key: str = ""
     weather_city: str = ""
     enable_mic_monitor: bool = False
@@ -93,6 +93,10 @@ class PluginConfig(BaseModel):
     custom_tasks: str = ""
     rest_time_range: str = "22:00-06:00"
     enable_learning: bool = True
+    enable_manual_correction_learning: bool = True
+    enable_natural_feedback_learning: bool = True
+    enable_shared_activity_followup: bool = True
+    enable_shared_activity_preference_learning: bool = True
     learning_storage: str = ""
     interaction_kpi: int = 3
     debug: bool = False

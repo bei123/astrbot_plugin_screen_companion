@@ -40,6 +40,7 @@ const elements = {
     healthMeta: document.getElementById("healthMeta"),
     healthGrid: document.getElementById("healthGrid"),
     diaryList: document.getElementById("diaryList"),
+    diaryOverview: document.getElementById("diaryOverview"),
     diaryReflection: document.getElementById("diaryReflection"),
     diaryObservations: document.getElementById("diaryObservations"),
     toggleDiaryObservations: document.getElementById("toggleDiaryObservations"),
@@ -67,6 +68,7 @@ const elements = {
     activityCharts: document.getElementById("activityCharts"),
     recentActivities: document.getElementById("recentActivities"),
     runtimeMeta: document.getElementById("runtimeMeta"),
+    runtimeSummary: document.getElementById("runtimeSummary"),
     runtimeStats: document.getElementById("runtimeStats"),
     runtimeInsights: document.getElementById("runtimeInsights"),
     runtimeMedia: document.getElementById("runtimeMedia"),
@@ -78,6 +80,7 @@ const elements = {
     checkIntervalInput: document.getElementById("checkIntervalInput"),
     triggerProbabilityInput: document.getElementById("triggerProbabilityInput"),
     interactionFrequencyInput: document.getElementById("interactionFrequencyInput"),
+    activityOverview: document.getElementById("activityOverview"),
     enableDiarySelect: document.getElementById("enableDiarySelect"),
     enableLearningSelect: document.getElementById("enableLearningSelect"),
     enableMicMonitorSelect: document.getElementById("enableMicMonitorSelect"),
@@ -278,6 +281,22 @@ function renderActivityMetricGrid(stats) {
     ].join("");
 }
 
+function formatPercent(part, total) {
+    const base = Number(total || 0);
+    if (!base) return "0%";
+    return `${Math.round((Number(part || 0) / base) * 100)}%`;
+}
+
+function renderOverviewPill(label, value, tone = "") {
+    const toneClass = tone ? ` overview-pill--${tone}` : "";
+    return `
+        <article class="overview-pill${toneClass}">
+            <span class="panel-label">${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value)}</strong>
+        </article>
+    `;
+}
+
 function buildActivityChartCard(title, stats) {
     const totalSeconds = Number(stats.total_seconds || 0);
     const segments = [
@@ -384,6 +403,12 @@ function switchSettingsGroup(groupId) {
     renderSettingsForm();
 }
 
+function openSettingsGroup(groupId) {
+    switchSection("settings");
+    history.replaceState(null, "", "#settings");
+    switchSettingsGroup(groupId);
+}
+
 function getVisibleSettingsGroups() {
     const query = state.settingsSearch.trim().toLowerCase();
     if (!query) return state.settingsGroups;
@@ -417,8 +442,8 @@ function createSettingsInput(fieldKey, meta, value) {
         const select = document.createElement("select");
         select.dataset.settingKey = fieldKey;
         select.innerHTML = `
-            <option value="true">寮€鍚?</option>
-            <option value="false">鍏抽棴</option>
+            <option value="true">开启</option>
+            <option value="false">关闭</option>
         `;
         select.value = value ? "true" : "false";
         return select;
@@ -1026,18 +1051,50 @@ function splitDiaryContent(content) {
         return sections;
     }
 
-    const overviewPattern = /##\s*今日概览\s*[\s\S]*?(?=\n##\s*今日观察|\n##\s*今日感想|\n##\s*[^\n]+|$)/;
-    const observationMatch = text.match(/##\s*今日观察\s*([\s\S]*?)(?=\n##\s*今日感想|\n##\s*[^\n]+|$)/);
-    const reflectionMatch = text.match(/##\s*今日感想\s*([\s\S]*?)(?=\n##\s*[^\n]+|$)/);
+    const lines = text.replace(/\r\n/g, "\n").split("\n");
+    const buffers = {
+        overview: [],
+        observation: [],
+        reflection: [],
+    };
+    let currentSection = "";
+
+    for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (/^##\s*今日概览\s*$/.test(line)) {
+            currentSection = "overview";
+            continue;
+        }
+        if (/^##\s*今日观察\s*$/.test(line)) {
+            currentSection = "observation";
+            continue;
+        }
+        if (/^##\s*今日感想\s*$/.test(line)) {
+            currentSection = "reflection";
+            continue;
+        }
+        if (/^##(?!#)\s+/.test(line)) {
+            currentSection = "";
+            continue;
+        }
+        if (currentSection && Object.prototype.hasOwnProperty.call(buffers, currentSection)) {
+            buffers[currentSection].push(rawLine);
+        }
+    }
+
     const cleanedFull = text
-        .replace(overviewPattern, "")
         .replace(/^#\s*.+日记\s*$/m, "")
-        .replace(/^##\s*\d{4}年\d{1,2}月\d{1,2}日\s*$/m, "")
+        .replace(/^##\s*\d{4}年\d{1,2}月\d{1,2}日(?:\s+\S+)?\s*$/m, "")
         .replace(/^\*\*天气\*\*:\s*.*$/m, "")
+        .replace(/^天气[:：]\s*.*$/m, "")
+        .replace(/^##\s*今日概览\s*$/m, "")
+        .replace(/^##\s*今日观察\s*$/m, "")
+        .replace(/^##\s*今日感想\s*$/m, "")
+        .replace(/^[—-]{1,2}\s*\d{4}年\d{1,2}月\d{1,2}日.*$/m, "")
         .trim();
 
-    sections.observation = (observationMatch?.[1] || "").trim();
-    sections.reflection = (reflectionMatch?.[1] || "").trim();
+    sections.observation = buffers.observation.join("\n").trim();
+    sections.reflection = buffers.reflection.join("\n").trim();
     sections.full = cleanedFull || text.trim();
 
     if (!sections.reflection) {
@@ -1095,7 +1152,7 @@ function renderDiaryStructuredSummary(summary) {
     const mainWindows = Array.isArray(summary.main_windows) ? summary.main_windows : [];
     if (mainWindows.length) {
         blocks.push(`
-            <div>
+            <div class="diary-overview-item">
                 <strong>今日主要窗口</strong>
                 <p>${escapeHtml(mainWindows.slice(0, 3).map((item) => `${item.window_title || "当前窗口"}（约 ${item.duration_minutes || 0} 分钟）`).join("；"))}</p>
             </div>
@@ -1105,7 +1162,7 @@ function renderDiaryStructuredSummary(summary) {
     const longestTask = summary.longest_task && typeof summary.longest_task === "object" ? summary.longest_task : null;
     if (longestTask?.window_title) {
         blocks.push(`
-            <div>
+            <div class="diary-overview-item">
                 <strong>最长停留任务</strong>
                 <p>${escapeHtml(`${longestTask.window_title}（约 ${longestTask.duration_minutes || 0} 分钟${longestTask.focus ? `，主要在：${longestTask.focus}` : ""}）`)}</p>
             </div>
@@ -1115,7 +1172,7 @@ function renderDiaryStructuredSummary(summary) {
     const repeatedFocuses = Array.isArray(summary.repeated_focuses) ? summary.repeated_focuses : [];
     if (repeatedFocuses.length) {
         blocks.push(`
-            <div>
+            <div class="diary-overview-item">
                 <strong>重复卡点</strong>
                 <p>${escapeHtml(repeatedFocuses.slice(0, 3).map((item) => `${item.window_title || "当前窗口"}：${item.note || "重复出现"}`).join("；"))}</p>
             </div>
@@ -1125,7 +1182,7 @@ function renderDiaryStructuredSummary(summary) {
     const suggestionItems = Array.isArray(summary.suggestion_items) ? summary.suggestion_items : [];
     if (suggestionItems.length) {
         blocks.push(`
-            <div>
+            <div class="diary-overview-item">
                 <strong>建议事项</strong>
                 <ul>${suggestionItems.slice(0, 3).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>
             </div>
@@ -1133,7 +1190,12 @@ function renderDiaryStructuredSummary(summary) {
     }
 
     if (!blocks.length) return "";
-    return `<section class="helper-card"><strong>今日概览</strong>${blocks.join("")}</section>`;
+    return `
+        <section class="helper-card diary-overview-card">
+            <div class="diary-overview-head"><strong>今日概览</strong></div>
+            <div class="diary-overview-grid">${blocks.join("")}</div>
+        </section>
+    `;
 }
 
 function buildObservationExplainability(observation) {
@@ -1171,6 +1233,7 @@ function renderDiaryDetail(date, content, structuredSummary = {}) {
         empty.querySelector("p").textContent = "等插件在当天生成记录后，这里会显示完整内容。";
         elements.diaryReflection.innerHTML = "";
         elements.diaryReflection.appendChild(empty);
+        elements.diaryOverview.innerHTML = "";
         elements.diaryObservations.innerHTML = "";
         elements.diaryObservations.appendChild(cloneEmptyState());
         elements.diarySummary.textContent = state.diaryDates.length ? `共 ${state.diaryDates.length} 篇日记，默认打开最近日期。` : "还没有生成任何日记。";
@@ -1179,7 +1242,8 @@ function renderDiaryDetail(date, content, structuredSummary = {}) {
 
     const diary = splitDiaryContent(content);
     const structuredSummaryHtml = renderDiaryStructuredSummary(structuredSummary);
-    elements.diaryReflection.innerHTML = `${renderDiaryMarkdown(diary.reflection || diary.full)}${structuredSummaryHtml}`;
+    elements.diaryOverview.innerHTML = structuredSummaryHtml;
+    elements.diaryReflection.innerHTML = renderDiaryMarkdown(diary.reflection || diary.full);
 
     if (diary.observation) {
         const structuredEntries = parseDiaryObservationEntries(diary.observation);
@@ -1407,21 +1471,39 @@ function renderMemories() {
 
 function renderRuntime() {
     const runtime = state.runtime;
+    elements.runtimeSummary.innerHTML = "";
     elements.runtimeStats.innerHTML = "";
     elements.runtimeInsights.innerHTML = "";
     elements.runtimeMedia.innerHTML = "";
     if (!runtime) {
         elements.runtimeMeta.textContent = "尚未加载运行状态。";
+        elements.runtimeSummary.appendChild(cloneEmptyState());
         elements.runtimeStats.appendChild(cloneEmptyState());
         renderRuntimeMedia(null);
         return;
     }
 
-    elements.runtimeMeta.textContent = `状态 ${runtime.state || "unknown"} | 自动任务 ${runtime.active_task_count || 0} 个`;
+    elements.runtimeMeta.textContent = `状态 ${runtime.state || "unknown"} · 自动任务 ${runtime.active_task_count || 0} 个 · 观察 ${runtime.observation_count || 0} 条`;
+    const runtimeSummaryCards = [
+        ["插件状态", runtime.enabled ? "已启用" : "已关闭", runtime.enabled ? "good" : "muted"],
+        ["自动观察", runtime.is_running ? "运行中" : "待机中", runtime.is_running ? "good" : "muted"],
+        ["当前模式", runtime.interaction_mode || "未设置", ""],
+        [
+            "识屏链路",
+            runtime.screen_recognition_mode
+                ? "录屏视频"
+                : runtime.use_shared_screenshot_dir
+                    ? "共享截图"
+                    : "实时截图",
+            "",
+        ],
+        ["窗口陪伴", formatRuntimeSwitch(runtime.enable_window_companion, "开启", "关闭"), runtime.enable_window_companion ? "good" : "muted"],
+        ["学习功能", formatRuntimeSwitch(runtime.enable_learning, "开启", "关闭"), runtime.enable_learning ? "good" : "muted"],
+    ];
+    elements.runtimeSummary.innerHTML = runtimeSummaryCards
+        .map(([label, value, tone]) => renderOverviewPill(label, value, tone))
+        .join("");
     const cards = [
-        ["插件状态", runtime.enabled ? "已启用" : "已关闭"],
-        ["运行中", runtime.is_running ? "是" : "否"],
-        ["当前模式", runtime.interaction_mode || "未设置"],
         ["生效间隔", `${runtime.current_check_interval || 0} 秒`],
         ["触发概率", `${runtime.current_trigger_probability || 0}%`],
         ["观察记录", `${runtime.observation_count || 0} 条`],
@@ -1561,6 +1643,7 @@ async function loadMemories() {
 }
 
 async function loadActivityStats() {
+    if (elements.activityOverview) renderLoading(elements.activityOverview, "正在加载活动摘要...");
     renderLoading(elements.todayActivityStats, "正在加载活动统计...");
     renderLoading(elements.totalActivityStats, "正在加载活动统计...");
     if (elements.activityCharts) renderLoading(elements.activityCharts, "正在生成活动图表...");
@@ -1571,6 +1654,9 @@ async function loadActivityStats() {
         renderActivityStats();
     } catch (error) {
         console.error("加载活动统计失败:", error);
+        if (elements.activityOverview) {
+            elements.activityOverview.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动摘要</p></div>";
+        }
         elements.todayActivityStats.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
         elements.totalActivityStats.innerHTML = "<div class='empty-state'><strong>加载失败</strong><p>无法获取活动统计数据</p></div>";
         if (elements.activityCharts) {
@@ -1587,6 +1673,12 @@ function renderActivityStats() {
     const total = state.activityStats.total || {};
     const recentActivities = state.activityStats.recent_activities || [];
 
+    elements.activityOverview.innerHTML = [
+        renderOverviewPill("今日总计", today.total_time || "0分钟", "warm"),
+        renderOverviewPill("今日工作占比", formatPercent(today.work_seconds, today.total_seconds), "good"),
+        renderOverviewPill("累计总计", total.total_time || "0分钟", ""),
+        renderOverviewPill("累计工作占比", formatPercent(total.work_seconds, total.total_seconds), ""),
+    ].join("");
     elements.todayActivityStats.innerHTML = renderActivityMetricGrid(today);
     elements.totalActivityStats.innerHTML = renderActivityMetricGrid(total);
     renderActivityCharts(today, total);
@@ -1597,8 +1689,8 @@ function renderActivityStats() {
     }
 
     elements.recentActivities.innerHTML = recentActivities.map(activity => `
-        <article class="observation-card">
-            <div class="observation-header">
+        <article class="activity-record-card">
+            <div class="activity-record-head">
                 <div>
                     <h3 class="list-item-title">${escapeHtml(activity.type)} - ${escapeHtml(activity.scene)}</h3>
                     <div class="observation-tags">
@@ -1606,8 +1698,9 @@ function renderActivityStats() {
                         <span class="tag">${escapeHtml(activity.duration)}</span>
                     </div>
                 </div>
+                <span class="activity-record-range">${escapeHtml(activity.start_time)} - ${escapeHtml(activity.end_time)}</span>
             </div>
-            <p class="observation-content">${escapeHtml(activity.start_time)} - ${escapeHtml(activity.end_time)}</p>
+            <p class="memory-meta">${escapeHtml(activity.duration)} 内主要停留在 ${escapeHtml(activity.window)}</p>
         </article>
     `).join("");
 }
@@ -1779,48 +1872,57 @@ elements.loginForm.addEventListener("submit", async (event) => {
     }
 });
 
-elements.settingsHelper.addEventListener("click", async (event) => {
+async function handleSettingsActionClick(event) {
     const action = event.target.closest("[data-settings-action]")?.dataset.settingsAction;
     if (!action) return;
 
     if (action === "open-vision-group") {
-        switchSettingsGroup("vision");
+        openSettingsGroup("vision");
         return;
     }
     if (action === "open-runtime-group") {
-        switchSettingsGroup("runtime");
+        openSettingsGroup("runtime");
         return;
     }
     if (action === "open-persona-group") {
-        switchSettingsGroup("persona");
+        openSettingsGroup("persona");
         return;
     }
     if (action === "toggle-screen-assist") {
+        openSettingsGroup("persona");
         setSettingsValues({
             enable_natural_language_screen_assist: !Boolean(state.settingsValues.enable_natural_language_screen_assist),
         });
+        elements.settingsFeedback.textContent = "已切换自然语言求助开关，记得保存配置。";
         return;
     }
     if (action === "vision-live") {
+        openSettingsGroup("vision");
         setSettingsValues({
             use_shared_screenshot_dir: false,
             shared_screenshot_dir: "",
         });
+        elements.settingsFeedback.textContent = "已切回实时截图推荐值，记得保存配置。";
         return;
     }
     if (action === "vision-docker") {
+        openSettingsGroup("vision");
         setSettingsValues({
             use_shared_screenshot_dir: true,
         });
+        elements.settingsFeedback.textContent = "已切到共享截图目录模式，记得保存配置。";
         return;
     }
     if (action === "toggle-window-companion") {
+        openSettingsGroup("runtime");
         setSettingsValues({
             enable_window_companion: !Boolean(state.settingsValues.enable_window_companion),
         });
+        elements.settingsFeedback.textContent = "已切换窗口自动陪伴开关，记得保存配置。";
         return;
     }
     if (action === "load-window-candidates") {
+        openSettingsGroup("runtime");
         elements.settingsFeedback.textContent = "正在读取当前窗口列表...";
         try {
             await loadWindowCandidates();
@@ -1833,6 +1935,7 @@ elements.settingsHelper.addEventListener("click", async (event) => {
         return;
     }
     if (action.startsWith("window-candidate::")) {
+        openSettingsGroup("runtime");
         const index = Number(action.split("::")[1]);
         const title = state.windowCandidates[index];
         appendWindowCompanionTarget(title);
@@ -1840,7 +1943,10 @@ elements.settingsHelper.addEventListener("click", async (event) => {
             ? `已把“${title}”加入窗口陪伴目标。`
             : "这个窗口候选已经失效，请重新读取窗口列表。";
     }
-});
+}
+
+elements.settingsHelper.addEventListener("click", handleSettingsActionClick);
+elements.runtimeInsights.addEventListener("click", handleSettingsActionClick);
 elements.runtimeForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     elements.runtimeFeedback.textContent = "";
@@ -1926,5 +2032,3 @@ window.addEventListener("DOMContentLoaded", async () => {
         setConnectionState("error", `初始化失败: ${error.message}`);
     }
 });
-
-
