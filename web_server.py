@@ -12,6 +12,16 @@ from aiohttp import web
 
 from astrbot.api import logger
 
+from .core.learning_preferences import save_corrections, save_learning_data
+from .core.observations_store import save_observations
+from .core.persona import append_privacy_guard_prompt, get_persona_prompt
+from .core.screen_vision import call_external_vision_api
+from .core.webui_lifecycle import (
+    webui_auth_enabled,
+    webui_expected_secret,
+    webui_session_timeout_seconds,
+)
+
 
 class WebServer:
     """Embedded WebUI server for Screen Companion."""
@@ -119,35 +129,13 @@ class WebServer:
             )
 
     def _is_auth_enabled(self) -> bool:
-        try:
-            auth_enabled = self.plugin.plugin_config.webui.auth_enabled
-            return bool(auth_enabled)
-        except Exception:
-            return True
+        return webui_auth_enabled(self.plugin)
 
     def _get_expected_secret(self) -> str:
-        password = ""
-        try:
-            password = str(self.plugin.plugin_config.webui.password or "").strip()
-        except Exception:
-            password = ""
-
-        if not password:
-            return ""
-        if not self._is_auth_enabled():
-            return ""
-        return password
+        return webui_expected_secret(self.plugin)
 
     def _get_session_timeout(self) -> int:
-        timeout = 3600
-        try:
-            timeout = int(self.plugin.plugin_config.webui.session_timeout or 3600)
-        except Exception:
-            timeout = 3600
-
-        if timeout <= 0:
-            timeout = 3600
-        return timeout
+        return webui_session_timeout_seconds(self.plugin)
 
     @staticmethod
     def _is_public_path(path: str) -> bool:
@@ -453,7 +441,7 @@ class WebServer:
         logger.error(f"WebUI 启动失败，原因: {last_error or '未知错误'}")
         return False
 
-    async def stop(self):
+    async def stop(self) -> None:
         """Stop the embedded WebUI server."""
         if not self._started and not self.site and not self.runner:
             return
@@ -1883,7 +1871,7 @@ class WebServer:
             index = int(request.match_info["index"])
             if 0 <= index < len(self.plugin.observations):
                 deleted_observation = self.plugin.observations.pop(index)
-                self.plugin._save_observations()
+                save_observations(self.plugin)
                 return self._ok({"deleted": deleted_observation})
             else:
                 return self._err("索引超出范围", 400)
@@ -1903,7 +1891,7 @@ class WebServer:
                 if 0 <= index < len(self.plugin.observations):
                     self.plugin.observations.pop(index)
                     deleted_count += 1
-            self.plugin._save_observations()
+            save_observations(self.plugin)
             return self._ok({"deleted_count": deleted_count})
         except Exception as e:
             logger.error(f"批量删除观察记录失败: {e}")
@@ -1924,14 +1912,14 @@ class WebServer:
             if hasattr(self.plugin, "observations"):
                 obs_count = len(self.plugin.observations or [])
                 self.plugin.observations = []
-                self.plugin._save_observations()
+                save_observations(self.plugin)
                 if obs_count > 0:
                     cleared_items.append(f"观察记录({obs_count}条)")
             
             # 清空学习数据
             if hasattr(self.plugin, "learning_data"):
                 self.plugin.learning_data = {}
-                self.plugin._save_learning_data()
+                save_learning_data(self.plugin)
                 cleared_items.append("学习数据")
             
             # 清空长期记忆
@@ -1943,7 +1931,7 @@ class WebServer:
             # 清空纠正数据
             if hasattr(self.plugin, "corrections"):
                 self.plugin.corrections = {}
-                self.plugin._save_corrections()
+                save_corrections(self.plugin)
                 cleared_items.append("纠正数据")
             
             # 清空日记
@@ -2057,7 +2045,9 @@ class WebServer:
                     "reply": "I do not have vision configured yet.",
                 }
 
-            recognition_text = await self.plugin._call_external_vision_api(image_bytes)
+            recognition_text = await call_external_vision_api(
+                self.plugin, image_bytes
+            )
             if not recognition_text or "??" in recognition_text or "??" in recognition_text:
                 return {
                     "success": False,
@@ -2070,13 +2060,15 @@ class WebServer:
             if custom_prompt:
                 interaction_prompt += f" {custom_prompt}"
 
-            system_prompt = await self.plugin._get_persona_prompt()
+            system_prompt = await get_persona_prompt(self.plugin)
             provider = self.plugin.context.get_using_provider()
             if provider:
                 try:
                     response = await asyncio.wait_for(
                         provider.text_chat(
-                            prompt=self.plugin._append_privacy_guard_prompt(interaction_prompt),
+                            prompt=append_privacy_guard_prompt(
+                                self.plugin, interaction_prompt
+                            ),
                             system_prompt=system_prompt
                         ),
                         timeout=60.0,

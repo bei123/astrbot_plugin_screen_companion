@@ -1,0 +1,1 @@
+"""Screen companion plugin core package (config, relay, capture, recording, diary, diary_runtime, proactive_messaging, window_companion, screen_vision, screen_analysis, gemini_multimodal, memory, helpers)."""
