@@ -63,9 +63,66 @@ def run_gui():
         sys.exit(1)
 
     app = tk.Tk()
-    app.title("屏幕伴侣 - Windows 端推送")
-    app.minsize(420, 380)
+    app.title("屏幕伴侣 · 推送")
+    app.minsize(460, 520)
     app.resizable(True, True)
+
+    # —— 现代简洁主题（ttk + clam，便于统一配色）——
+    BG = "#eceef2"
+    CARD = "#ffffff"
+    TEXT = "#1a1c1e"
+    MUTED = "#5c6370"
+    BORDER = "#d1d5db"
+    ACCENT = "#2563eb"
+    ACCENT_HOVER = "#1d4ed8"
+
+    app.configure(bg=BG)
+    style = ttk.Style(app)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    style.configure(".", background=BG, foreground=TEXT)
+    style.configure("TFrame", background=BG)
+    style.configure("Card.TFrame", background=CARD)
+    style.configure("TLabel", background=BG, foreground=TEXT, font=("Microsoft YaHei UI", 9))
+    style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Microsoft YaHei UI", 17, "bold"))
+    style.configure("Subtitle.TLabel", background=BG, foreground=MUTED, font=("Microsoft YaHei UI", 9))
+    style.configure("Hint.TLabel", background=CARD, foreground=MUTED, font=("Microsoft YaHei UI", 8))
+    style.configure("Section.TLabel", background=CARD, foreground=MUTED, font=("Microsoft YaHei UI", 8))
+    style.configure("Status.TLabel", background=BG, foreground=MUTED, font=("Microsoft YaHei UI", 9))
+    style.configure("StatusActive.TLabel", background=BG, foreground=ACCENT, font=("Microsoft YaHei UI", 9, "bold"))
+    style.configure("TLabelframe", background=CARD, relief="flat", borderwidth=0)
+    style.configure("TLabelframe.Label", background=CARD, foreground=MUTED, font=("Microsoft YaHei UI", 9, "bold"))
+    style.configure("TCheckbutton", background=CARD, foreground=TEXT, font=("Microsoft YaHei UI", 9))
+    style.map("TCheckbutton", background=[("active", CARD)])
+    style.configure("TEntry", fieldbackground="#ffffff", foreground=TEXT, insertcolor=TEXT)
+    style.configure("TSeparator", background=BORDER)
+    style.configure(
+        "Primary.TButton",
+        background=ACCENT,
+        foreground="#ffffff",
+        borderwidth=0,
+        focuscolor="none",
+        font=("Microsoft YaHei UI", 9, "bold"),
+        padding=(18, 8),
+    )
+    style.map("Primary.TButton", background=[("active", ACCENT_HOVER), ("disabled", "#93c5fd")])
+    style.configure(
+        "Ghost.TButton",
+        background=CARD,
+        foreground=TEXT,
+        borderwidth=1,
+        focuscolor="none",
+        font=("Microsoft YaHei UI", 9),
+        padding=(16, 8),
+    )
+    style.map(
+        "Ghost.TButton",
+        background=[("active", "#f3f4f6"), ("disabled", "#f3f4f6")],
+        foreground=[("disabled", MUTED)],
+    )
 
     # 状态与控制
     stop_event = threading.Event()
@@ -90,66 +147,116 @@ def run_gui():
 
         app.after(0, _append)
 
-    # 顶部配置区
-    frame_cfg = ttk.LabelFrame(app, text="连接与推送设置", padding=8)
-    frame_cfg.pack(fill=tk.X, padx=8, pady=6)
-
-    row = 0
-    ttk.Label(frame_cfg, text="服务器地址:").grid(row=row, column=0, sticky=tk.W, padx=(0, 4), pady=2)
-    var_host = tk.StringVar(value="127.0.0.1")
-    entry_host = ttk.Entry(frame_cfg, textvariable=var_host, width=18)
-    entry_host.grid(row=row, column=1, sticky=tk.W, pady=2)
-    ttk.Label(frame_cfg, text="端口:").grid(row=row, column=2, sticky=tk.W, padx=(12, 4), pady=2)
-    var_port = tk.StringVar(value="8765")
-    entry_port = ttk.Entry(frame_cfg, textvariable=var_port, width=6)
-    entry_port.grid(row=row, column=3, sticky=tk.W, pady=2)
+    # 顶栏标题
+    header = ttk.Frame(app, padding=(20, 18, 20, 6))
+    header.pack(fill=tk.X)
+    ttk.Label(header, text="屏幕伴侣", style="Title.TLabel").pack(anchor=tk.W)
     ttk.Label(
-        frame_cfg,
-        text="(与插件 screen_relay_port 一致)",
-        font=("TkDefaultFont", 8),
-    ).grid(row=row, column=4, sticky=tk.W, padx=(6, 0), pady=2)
+        header,
+        text="将本机画面推送到 AstrBot 插件（截图来源需为 remote）",
+        style="Subtitle.TLabel",
+    ).pack(anchor=tk.W, pady=(4, 0))
+
+    ttk.Separator(app, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=20, pady=(4, 0))
+
+    body = ttk.Frame(app, padding=(20, 14, 20, 8))
+    body.pack(fill=tk.BOTH, expand=True)
+
+    def _card(parent, title: str):
+        wrap = tk.Frame(parent, bg=BG, highlightbackground=BORDER, highlightthickness=1)
+        wrap.pack(fill=tk.X, pady=(0, 12))
+        inner = ttk.Frame(wrap, style="Card.TFrame", padding=(14, 12, 14, 14))
+        inner.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(inner, text=title.upper(), style="Section.TLabel").pack(anchor=tk.W, pady=(0, 10))
+        form = ttk.Frame(inner, style="Card.TFrame")
+        form.pack(fill=tk.X)
+        return form
+
+    # 连接
+    form_conn = _card(body, "连接")
+    row = 0
+    ttk.Label(form_conn, text="服务器地址", style="Hint.TLabel").grid(row=row, column=0, sticky=tk.W, pady=(0, 2))
+    ttk.Label(form_conn, text="端口", style="Hint.TLabel").grid(row=row, column=1, sticky=tk.W, padx=(16, 0), pady=(0, 2))
+    row += 1
+    var_host = tk.StringVar(value="127.0.0.1")
+    entry_host = ttk.Entry(form_conn, textvariable=var_host, width=22)
+    entry_host.grid(row=row, column=0, sticky=tk.W)
+    var_port = tk.StringVar(value="8765")
+    entry_port = ttk.Entry(form_conn, textvariable=var_port, width=8)
+    entry_port.grid(row=row, column=1, sticky=tk.W, padx=(16, 0))
+    row += 1
+    ttk.Label(
+        form_conn,
+        text="端口须与插件配置 screen_relay_port 一致（默认 8765）",
+        style="Hint.TLabel",
+    ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
     row += 1
 
-    ttk.Label(frame_cfg, text="截图间隔(秒):").grid(row=row, column=0, sticky=tk.W, padx=(0, 4), pady=2)
+    # 画面
+    form_cap = _card(body, "画面")
+    row = 0
+    ttk.Label(form_cap, text="截图间隔（秒）", style="Hint.TLabel").grid(row=row, column=0, sticky=tk.W, pady=(0, 2))
+    ttk.Label(form_cap, text="JPEG 质量（1–100）", style="Hint.TLabel").grid(row=row, column=1, sticky=tk.W, padx=(16, 0), pady=(0, 2))
+    row += 1
     var_interval = tk.StringVar(value="3")
-    entry_interval = ttk.Entry(frame_cfg, textvariable=var_interval, width=6)
-    entry_interval.grid(row=row, column=1, sticky=tk.W, pady=2)
-    ttk.Label(frame_cfg, text="截图质量(1-100):").grid(row=row, column=2, sticky=tk.W, padx=(12, 4), pady=2)
+    entry_interval = ttk.Entry(form_cap, textvariable=var_interval, width=8)
+    entry_interval.grid(row=row, column=0, sticky=tk.W)
     var_quality = tk.StringVar(value="70")
-    entry_quality = ttk.Entry(frame_cfg, textvariable=var_quality, width=6)
-    entry_quality.grid(row=row, column=3, sticky=tk.W, pady=2)
+    entry_quality = ttk.Entry(form_cap, textvariable=var_quality, width=8)
+    entry_quality.grid(row=row, column=1, sticky=tk.W, padx=(16, 0))
     row += 1
-
     var_window_only = tk.BooleanVar(value=False)
-    cb_window = ttk.Checkbutton(frame_cfg, text="仅截取当前活动窗口", variable=var_window_only)
-    cb_window.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+    cb_window = ttk.Checkbutton(form_cap, text="仅截取当前活动窗口", variable=var_window_only)
+    cb_window.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(12, 0))
     if not _has_pygetwindow:
         cb_window.config(state=tk.DISABLED)
-        ttk.Label(frame_cfg, text="(需安装 pygetwindow)").grid(row=row, column=2, columnspan=2, sticky=tk.W, pady=2)
-    row += 1
+        ttk.Label(form_cap, text="需要安装 pygetwindow", style="Hint.TLabel").grid(
+            row=row + 1, column=0, columnspan=2, sticky=tk.W, pady=(4, 0)
+        )
 
+    # 音频
+    form_mic = _card(body, "音频")
+    mr = 0
     var_mic = tk.BooleanVar(value=False)
-    cb_mic = ttk.Checkbutton(frame_cfg, text="启用麦克风推送（实时音量）", variable=var_mic)
-    cb_mic.grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=2)
+    cb_mic = ttk.Checkbutton(form_mic, text="推送麦克风实时音量（与截图同连接）", variable=var_mic)
+    cb_mic.grid(row=mr, column=0, columnspan=2, sticky=tk.W)
+    mr += 1
     if not _has_mic_libs:
         cb_mic.config(state=tk.DISABLED)
-        ttk.Label(frame_cfg, text="(需安装 pyaudio numpy)").grid(row=row, column=2, columnspan=2, sticky=tk.W, pady=2)
-    row += 1
-
-    ttk.Label(frame_cfg, text="麦克风采样(次/秒):").grid(row=row, column=0, sticky=tk.W, padx=(0, 4), pady=2)
+        ttk.Label(form_mic, text="需要安装 pyaudio、numpy", style="Hint.TLabel").grid(
+            row=mr, column=0, columnspan=2, sticky=tk.W, pady=(4, 0)
+        )
+        mr += 1
+    ttk.Label(form_mic, text="采样频率（次/秒）", style="Hint.TLabel").grid(
+        row=mr, column=0, sticky=tk.W, pady=(10, 2)
+    )
+    mr += 1
     var_mic_rate = tk.StringVar(value="10")
-    entry_mic_rate = ttk.Entry(frame_cfg, textvariable=var_mic_rate, width=6)
-    entry_mic_rate.grid(row=row, column=1, sticky=tk.W, pady=2)
-    row += 1
+    entry_mic_rate = ttk.Entry(form_mic, textvariable=var_mic_rate, width=8)
+    entry_mic_rate.grid(row=mr, column=0, sticky=tk.W)
 
-    # 按钮与状态
-    frame_btn = ttk.Frame(app)
-    frame_btn.pack(fill=tk.X, padx=8, pady=4)
+    # 操作栏
+    frame_btn = ttk.Frame(app, padding=(20, 4, 20, 12))
+    frame_btn.pack(fill=tk.X)
     var_status = tk.StringVar(value="未连接")
-    label_status = ttk.Label(frame_btn, textvariable=var_status)
-    label_status.pack(side=tk.LEFT)
-    btn_start = ttk.Button(frame_btn, text="开始推送")
-    btn_stop = ttk.Button(frame_btn, text="停止推送", state=tk.DISABLED)
+
+    def _refresh_status_style(*_):
+        s = var_status.get()
+        if "已连接" in s or "正在连接" in s:
+            label_status.configure(style="StatusActive.TLabel")
+        else:
+            label_status.configure(style="Status.TLabel")
+
+    label_status = ttk.Label(frame_btn, textvariable=var_status, style="Status.TLabel")
+    label_status.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor=tk.W)
+    var_status.trace_add("write", _refresh_status_style)
+
+    btn_inner = ttk.Frame(frame_btn)
+    btn_inner.pack(side=tk.RIGHT)
+    btn_stop = ttk.Button(btn_inner, text="停止", style="Ghost.TButton", state=tk.DISABLED)
+    btn_stop.pack(side=tk.RIGHT, padx=(8, 0))
+    btn_start = ttk.Button(btn_inner, text="开始推送", style="Primary.TButton")
+    btn_start.pack(side=tk.RIGHT)
 
     def get_params():
         try:
@@ -359,9 +466,28 @@ def run_gui():
     btn_stop.pack(side=tk.RIGHT)
 
     # 日志区
-    frame_log = ttk.LabelFrame(app, text="运行日志", padding=4)
-    frame_log.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
-    log_text = scrolledtext.ScrolledText(frame_log, height=8, state=tk.DISABLED, wrap=tk.WORD, font=("Consolas", 9))
+    log_wrap = tk.Frame(app, bg=BG, highlightbackground=BORDER, highlightthickness=1)
+    log_wrap.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 16))
+    log_head = ttk.Frame(log_wrap, style="Card.TFrame", padding=(14, 10, 14, 0))
+    log_head.pack(fill=tk.X)
+    ttk.Label(log_head, text="运行日志", style="Section.TLabel").pack(anchor=tk.W)
+    log_inner = tk.Frame(log_wrap, bg=CARD)
+    log_inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=(0, 1))
+    log_text = scrolledtext.ScrolledText(
+        log_inner,
+        height=9,
+        state=tk.DISABLED,
+        wrap=tk.WORD,
+        font=("Consolas", 10),
+        bg="#f8f9fb",
+        fg=TEXT,
+        insertbackground=TEXT,
+        relief=tk.FLAT,
+        borderwidth=0,
+        highlightthickness=0,
+        padx=12,
+        pady=10,
+    )
     log_text.pack(fill=tk.BOTH, expand=True)
     log(
         "就绪。地址填运行 AstrBot 的机器 IP；端口与插件「screen_relay_port」一致（默认 8765）；"
