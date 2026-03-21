@@ -26,14 +26,10 @@
   "interaction_mode": {
     "description": "互动模式",
     "type": "string",
-    "hint": "选择预设的互动模式：\n1. 轻度互动模式：检查间隔180秒，触发概率3%，适合日常使用\n2. 中度互动模式：检查间隔60秒，触发概率8%，适合直播/录屏陪伴\n3. 高频互动模式：检查间隔30秒，触发概率20%，适合测试/整活\n4. 静默模式：检查间隔300秒，触发概率1%，只在特定时段活跃\n选择自定义则使用下方手动配置的参数。",
+    "hint": "选择'自定义'使用下方手动配置的参数。",
     "default": "自定义",
-    "options": [
-      "自定义",
-      "轻度互动模式",
-      "中度互动模式",
-      "高频互动模式",
-      "静默模式"
+    "enum": [
+      "自定义"
     ],
     "condition": {
       "enabled": true
@@ -46,8 +42,7 @@
     "default": 300,
     "obvious_hint": true,
     "condition": {
-      "enabled": true,
-      "interaction_mode": "自定义"
+      "enabled": true
     }
   },
   "trigger_probability": {
@@ -57,8 +52,7 @@
     "default": 30,
     "obvious_hint": true,
     "condition": {
-      "enabled": true,
-      "interaction_mode": "自定义"
+      "enabled": true
     }
   },
   "active_time_range": {
@@ -71,70 +65,94 @@
       "enabled": true
     }
   },
-  "watch_mode": {
-    "description": "观察模式",
-    "type": "string",
-    "hint": "选择'观看'模式（正常观察）或'偷看'模式（偷偷瞄了一眼）。",
-    "default": "偷看",
-    "options": [
-      "观看",
-      "偷看"
-    ],
+  "custom_presets": {
+    "description": "自定义预设",
+    "type": "text",
+    "hint": "设置自定义互动预设，格式：预设名称|检查间隔(秒)|触发概率(%)，每行一个预设。例如：\n我的预设1|90|30\n高频模式|30|50",
+    "default": "",
+    "editor_mode": true,
+    "editor_language": "text",
     "condition": {
       "enabled": true
     }
   },
-  "capture_mode": {
-    "description": "截图区域",
-    "type": "string",
-    "hint": "选择截取全屏还是活动窗口（注：部分系统环境下活动窗口模式可能失效）。仅在本机截屏（截图来源为「本机」）时生效。",
-    "default": "fullscreen",
-    "options": [
-      "fullscreen",
-      "active_window"
-    ],
+  "current_preset_index": {
+    "description": "当前使用的预设",
+    "type": "int",
+    "hint": "选择当前使用的预设序号（从0开始），-1表示使用手动配置的参数。",
+    "default": -1,
+    "obvious_hint": true,
     "condition": {
       "enabled": true
     }
   },
-  "capture_source": {
-    "description": "截图来源",
+  "use_companion_mode": {
+    "description": "使用陪伴模式",
+    "type": "bool",
+    "hint": "开启后使用陪伴模式（持续陪伴），关闭则使用偷看模式（偶尔观察）。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "screen_recognition_mode": {
+    "description": "开启视频识别",
+    "type": "bool",
+    "hint": "开启后使用桌面录屏作为识别素材；关闭后使用当前截图作为识别素材。录屏模式会消耗更多的token但能让bot更好地识别你在做什么。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "ffmpeg_path": {
+    "description": "ffmpeg 可执行文件路径",
     "type": "string",
-    "hint": "本机：在运行 AstrBot 的机器上直接截屏（需图形界面）。远程：由 Windows 端常驻程序推送截图到本插件，适用于 AstrBot 跑在无桌面的 Linux 服务器时。选「远程」时需在下方填写插件暴露的端口，并在 Windows 上运行 screen_relay_client_win.py。",
-    "default": "local",
-    "options": [
-      "local",
-      "remote"
-    ]
+    "hint": "留空则自动查找。如填写，需填写 ffmpeg.exe 的绝对路径。默认会优先查找插件数据目录下的 bin/ffmpeg.exe。ffmpeg 用于录屏，不下载则无法使用录屏模式。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "screen_recognition_mode": true
+    }
   },
-  "screen_relay_port": {
-    "description": "远程截图监听端口",
+  "recording_fps": {
+    "description": "录屏帧率",
+    "type": "float",
+    "hint": "录屏模式下每秒采样的帧数。支持小数，最小值为0.01，最大值为30，如 0.5 代表 2 秒/帧。非精细操作建议保持在默认值1。",
+    "default": 1,
+    "min": 0.01,
+    "max": 30,
+    "condition": {
+      "enabled": true,
+      "screen_recognition_mode": true
+    }
+  },
+  "recording_duration_seconds": {
+    "description": "录屏时长（秒）",
     "type": "int",
-    "hint": "当截图来源为「远程」时，插件在本机监听的 TCP 端口号（1-65535）。Windows 端推送程序需连接此端口。请确保防火墙放行该端口。",
-    "default": 8765
-  },
-  "screen_relay_bind": {
-    "description": "远程截图监听地址",
-    "type": "string",
-    "hint": "当截图来源为「远程」时，插件绑定的网卡地址。默认 0.0.0.0 表示接受所有网卡的连接。",
-    "default": "0.0.0.0"
-  },
-  "image_quality": {
-    "description": "截图压缩质量",
-    "type": "int",
-    "hint": "值越高画质越好，建议保持在80+",
-    "default": 85,
+    "hint": "每次录制桌面视频的时长。值越大越能保留完整操作过程，但会相对增加上传体积、耗时和 token 消耗。",
+    "default": 10,
     "min": 1,
-    "max": 100,
+    "max": 300,
     "condition": {
-      "enabled": true
+      "enabled": true,
+      "screen_recognition_mode": true
+    }
+  },
+  "capture_active_window": {
+    "description": "只截取活动窗口",
+    "type": "bool",
+    "hint": "开启后只截取活动窗口，关闭则截取全屏（注：部分系统环境下活动窗口模式可能失效）。",
+    "default": false,
+    "condition": {
+      "enabled": true,
+      "screen_recognition_mode": false
     }
   },
   "bot_vision_quality": {
     "description": "Bot 近视程度",
     "type": "int",
-    "hint": "值越高看得越清楚，建议保持在80+",
-    "default": 85,
+    "hint": "值越高看得越清楚（0-100），建议保持在85+",
+    "default": 100,
     "min": 1,
     "max": 100,
     "condition": {
@@ -144,35 +162,42 @@
   "image_prompt": {
     "description": "图像识别提示词",
     "type": "text",
-    "hint": "自定义LLM识别图像时的提示词，以获得更好的识别效果。",
-    "default": "请详细分析这张屏幕截图，捕捉以下细节：1. 屏幕上的具体应用程序、窗口和界面元素 2. 用户正在进行的具体操作和任务 3. 屏幕上的详细文字、图片、图标等内容 4. 用户的操作习惯和行为模式 5. 任何可能被忽略的细节信息。请提供详细的分析结果，重点突出用户当前活动的具体细节，以便我能准确了解用户正在做什么。",
+    "hint": "自定义视觉模型识别图片时的提示词。建议优先要求模型输出“任务、阶段、关键线索、建议点”这类高价值信息，并尽量保持简短，以减少 token 消耗。",
+    "default": "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
       "enabled": true
     }
   },
-  "vision_source": {
-    "description": "屏幕识别视觉来源",
-    "type": "string",
-    "hint": "仅外接：只用下方配置的外接视觉 API。仅框架：只用 AstrBot 的「默认图片转述模型」或当前对话模型（需支持多模态），请在提供方设置中配置。外接+框架回退：优先用框架视觉，失败时再用外接 API。",
-    "default": "仅外接",
-    "options": [
-      "仅外接",
-      "仅框架",
-      "外接+框架回退"
-    ],
+  "use_external_vision": {
+    "description": "优先调用外部视觉API",
+    "type": "bool",
+    "hint": "开启后，先把截图或录屏发送给外部视觉 API 做识别，再把识别文本交给 AstrBot 回复；关闭后，会把图片或视频转成 base64 作为多模态消息直接发送给 AstrBot 当前 provider。",
+    "default": true,
     "condition": {
       "enabled": true
+    }
+  },
+  "allow_unsafe_video_direct_fallback": {
+    "description": "允许兼容视频直发回退",
+    "type": "bool",
+    "hint": "仅在关闭外部视觉 API 且开启视频识别时生效。开启后，允许用户直接把录屏视频作为多模态消息发送给 AstrBot 当前 provider。这样可能导致请求体很大和 token 消耗明显增加，但实测似乎没太大变化，可以调低帧率和时长自己测一测。",
+    "default": false,
+    "condition": {
+      "enabled": true,
+      "use_external_vision": false,
+      "screen_recognition_mode": true
     }
   },
   "vision_api_url": {
     "description": "视觉API地址",
     "type": "string",
-    "hint": "外接视觉 API 的 URL。视觉来源为「仅外接」时必填；为「外接+框架回退」时在框架失败后使用，建议一并填写。",
+    "hint": "外接视觉API的URL地址，例如：https://api.qhaigc.net/v1/chat/completions。",
     "default": "",
     "condition": {
-      "enabled": true
+      "enabled": true,
+      "use_external_vision": true
     }
   },
   "vision_api_key": {
@@ -181,7 +206,8 @@
     "hint": "外接视觉API的密钥。",
     "default": "",
     "condition": {
-      "enabled": true
+      "enabled": true,
+      "use_external_vision": true
     }
   },
   "vision_api_model": {
@@ -190,26 +216,111 @@
     "hint": "外接视觉API使用的模型名称。",
     "default": "",
     "condition": {
-      "enabled": true
+      "enabled": true,
+      "use_external_vision": true
     }
   },
-  "weather_api_key": {
-    "description": "天气API密钥",
+  "vision_api_url_backup": {
+    "description": "备用视觉API地址",
     "type": "string",
-    "hint": "用于获取天气信息的API密钥，例如OpenWeatherMap的API密钥。留空则不启用天气感知功能。",
-    "default": "",
-    "condition": {
-      "enabled": true
-    }
-  },
-  "weather_city": {
-    "description": "城市名称",
-    "type": "string",
-    "hint": "用于获取天气信息的城市名称，例如'Beijing'或'上海'。",
+    "hint": "备用外接视觉API的URL地址，当主API失败时使用。",
     "default": "",
     "condition": {
       "enabled": true,
-      "weather_api_key": ""
+      "use_external_vision": true
+    }
+  },
+  "vision_api_key_backup": {
+    "description": "备用视觉API密钥",
+    "type": "string",
+    "hint": "备用外接视觉API的密钥。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "use_external_vision": true
+    }
+  },
+  "vision_api_model_backup": {
+    "description": "备用视觉API模型",
+    "type": "string",
+    "hint": "备用外接视觉API使用的模型名称。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "use_external_vision": true
+    }
+  },
+  "enable_privacy_guard": {
+    "description": "开启隐私输出保护",
+    "type": "bool",
+    "hint": "默认开启。开启后会向识屏提示词注入隐私保护要求，尽量避免 bot 直接复述屏幕中的敏感信息。",
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "user_preferences": {
+    "description": "用户偏好设置",
+    "type": "text",
+    "hint": "设置不同场景的互动风格，格式为每行一个场景：场景名称 互动风格描述。例如：编程 严厉的导师风格，催促用户专注编码。",
+    "default": "游戏 专业的游戏高手，指导玩家提升水平",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true
+    }
+  },
+  "use_llm_for_start_end": {
+    "description": "使用 LLM 回复开始和结束消息",
+    "type": "bool",
+    "hint": "开启后使用 LLM 生成开始和结束消息，关闭则使用预设回复。",
+    "default": true,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "start_preset": {
+    "description": "开始预设回复",
+    "type": "string",
+    "hint": "不使用 LLM 时的开始回复内容",
+    "default": "知道啦~我会时不时过来看一眼的",
+    "condition": {
+      "enabled": true,
+      "use_llm_for_start_end": false
+    }
+  },
+  "end_preset": {
+    "description": "结束预设回复",
+    "type": "string",
+    "hint": "不使用 LLM 时的结束回复内容",
+    "default": "好啦，我不看了～下次再陪你玩！",
+    "condition": {
+      "enabled": true,
+      "use_llm_for_start_end": false
+    }
+  },
+  "start_llm_prompt": {
+    "description": "开始 LLM 提示词",
+    "type": "text",
+    "hint": "使用 LLM 时的开始回复提示词",
+    "default": "以你的性格向用户表达你会开始偶尔地偷看用户的屏幕了，尽可能简短，保持在一句话内。",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true,
+      "use_llm_for_start_end": true
+    }
+  },
+  "end_llm_prompt": {
+    "description": "结束 LLM 提示词",
+    "type": "text",
+    "hint": "使用 LLM 时的结束回复提示词",
+    "default": "以你的性格向用户表达你停止看用户的屏幕了，尽可能简短，保持在一句话内。",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true,
+      "use_llm_for_start_end": true
     }
   },
   "enable_diary": {
@@ -224,8 +335,8 @@
   "diary_time": {
     "description": "日记生成时间",
     "type": "string",
-    "hint": "每天生成日记的时间，格式为'HH:MM'，例如'22:00'。",
-    "default": "22:00",
+    "hint": "每天生成日记的时间，格式为'HH:MM'，例如'00:00'表示午夜12点。",
+    "default": "00:00",
     "condition": {
       "enabled": true,
       "enable_diary": true
@@ -235,7 +346,7 @@
     "description": "日记存储路径",
     "type": "string",
     "hint": "日记文件的存储路径，留空则使用默认路径。",
-    "default": "E:\\astrbot\\小日记",
+    "default": "",
     "condition": {
       "enabled": true,
       "enable_diary": true
@@ -272,6 +383,7 @@
       "diary_auto_recall": true
     }
   },
+
   "diary_send_as_image": {
     "description": "以图片形式发送日记",
     "type": "bool",
@@ -282,6 +394,7 @@
       "enable_diary": true
     }
   },
+
   "diary_generation_prompt": {
     "description": "日记生成提示词",
     "type": "text",
@@ -294,13 +407,24 @@
       "enable_diary": true
     }
   },
-  "diary_response_prompt": {
-    "description": "日记被偷看回应提示词",
-    "type": "text",
-    "hint": "当用户查看日记时，用于生成相应回应的提示词。",
-    "default": "你发现用户居然偷看了你写的用户观察日记，给予相应回应。",
-    "editor_mode": true,
-    "editor_language": "text"
+  "weather_api_key": {
+    "description": "天气API密钥",
+    "type": "string",
+    "hint": "用于获取天气信息的API密钥，例如OpenWeatherMap的API密钥。留空则不启用天气感知功能。",
+    "default": "",
+    "condition": {
+      "enabled": true
+    }
+  },
+  "weather_city": {
+    "description": "城市名称",
+    "type": "string",
+    "hint": "用于获取天气信息的城市名称，例如'Beijing'或'上海'。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "weather_api_key": ""
+    }
   },
   "enable_mic_monitor": {
     "description": "启用麦克风监听",
@@ -331,6 +455,24 @@
       "enable_mic_monitor": true
     }
   },
+  "memory_threshold": {
+    "description": "内存阈值",
+    "type": "int",
+    "hint": "当内存使用率超过此阈值时，系统会提示用户注意资源使用情况，范围 0-100。",
+    "default": 80,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "battery_threshold": {
+    "description": "电量阈值",
+    "type": "int",
+    "hint": "当设备电量低于此阈值时，会提醒用户保存进度，范围 0-100。",
+    "default": 20,
+    "condition": {
+      "enabled": true
+    }
+  },
   "admin_qq": {
     "description": "管理员QQ号",
     "type": "string",
@@ -343,101 +485,66 @@
   "proactive_target": {
     "description": "主动消息推送目标",
     "type": "string",
-    "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。如果不填写，插件将尝试使用管理员QQ号构建目标。格式参考：aiocqhttp:FriendMessage:123456",
+      "hint": "填写接收主动消息的统一会话ID（unified_msg_origin）。建议直接填写实际会话ID，例如 default:FriendMessage:123456；旧格式 aiocqhttp:FriendMessage:123456 也会自动兼容。",
     "default": "",
     "condition": {
       "enabled": true
     }
   },
   "save_local": {
-    "description": "是否在本地保留截图",
+    "description": "是否在本地保留最近一次识别素材",
     "type": "bool",
-    "hint": "如果开启，最近一次截图将保存在 data 目录中。关闭则在发送给 AI 后立即删除，以节省空间。",
+    "hint": "截图模式下会保留最近一次截图；录屏模式下会保留最近一次 mp4，方便排查识别结果。",
     "default": true,
     "condition": {
       "enabled": true
+    }
+  },
+  "enable_natural_language_screen_assist": {
+    "description": "启用自然语言识屏求助",
+    "type": "bool",
+    "hint": "开启后，用户用自然语言表达“帮我看看屏幕并给建议”时，bot 会主动截图分析并回应。默认关闭，以减少误触。",
+    "default": false,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "use_shared_screenshot_dir": {
+    "description": "启用共享截图目录",
+    "type": "bool",
+    "hint": "主要用于 Docker 等无法直接截图的部署环境。开启后，插件会优先从共享目录读取截图；默认关闭，普通桌面环境建议保持关闭。",
+    "default": false,
+    "condition": {
+      "enabled": true,
+      "screen_recognition_mode": false
+    }
+  },
+  "shared_screenshot_dir": {
+    "description": "共享截图目录路径",
+    "type": "string",
+    "hint": "当启用共享截图目录后生效。建议挂载为宿主机持续更新截图的目录。",
+    "default": "",
+    "condition": {
+      "enabled": true,
+      "use_shared_screenshot_dir": true,
+      "screen_recognition_mode": false
     }
   },
   "custom_tasks": {
     "description": "自定义监控任务",
     "type": "text",
     "hint": "设置特定时间的监控任务，格式为每行一个任务：时间 提示词。例如：02:00 这么晚了还在工作，快去休息吧！",
-    "default": "02:00 根据用户行为催促其尽快休息",
+    "default": "",
     "editor_mode": true,
     "editor_language": "text",
     "condition": {
       "enabled": true
-    }
-  },
-  "user_preferences": {
-    "description": "用户偏好设置",
-    "type": "text",
-    "hint": "设置不同场景的互动风格，格式为每行一个场景：场景名称 互动风格描述。例如：编程 严厉的导师风格，催促用户专注编码。",
-    "default": "游戏 专业的游戏高手，指导玩家提升水平",
-    "editor_mode": true,
-    "editor_language": "text",
-    "condition": {
-      "enabled": true
-    }
-  },
-  "start_end_mode": {
-    "description": "开始/结束回复模式",
-    "type": "string",
-    "hint": "选择使用预设回复还是 LLM 生成回复",
-    "default": "llm",
-    "options": ["preset", "llm"],
-    "condition": {
-      "enabled": true
-    }
-  },
-  "start_preset": {
-    "description": "开始预设回复",
-    "type": "string",
-    "hint": "使用预设模式时的开始回复内容",
-    "default": "知道啦~我会时不时过来看一眼的",
-    "condition": {
-      "enabled": true,
-      "start_end_mode": "preset"
-    }
-  },
-  "end_preset": {
-    "description": "结束预设回复",
-    "type": "string",
-    "hint": "使用预设模式时的结束回复内容",
-    "default": "好啦，我不看了～下次再陪你玩！",
-    "condition": {
-      "enabled": true,
-      "start_end_mode": "preset"
-    }
-  },
-  "start_llm_prompt": {
-    "description": "开始 LLM 提示词",
-    "type": "text",
-    "hint": "使用 LLM 模式时的开始回复提示词",
-    "default": "现在你开始监控用户的屏幕，用调皮可爱的语气和他打招呼，表现出你要开始偷看他的屏幕了，语气要符合活泼可爱的AI助手风格，简短自然。",
-    "editor_mode": true,
-    "editor_language": "text",
-    "condition": {
-      "enabled": true,
-      "start_end_mode": "llm"
-    }
-  },
-  "end_llm_prompt": {
-    "description": "结束 LLM 提示词",
-    "type": "text",
-    "hint": "使用 LLM 模式时的结束回复提示词",
-    "default": "现在你结束监控用户的屏幕，用调皮可爱的语气和他告别，表现出你要停止偷看了，语气要符合活泼可爱的AI助手风格，简短自然。",
-    "editor_mode": true,
-    "editor_language": "text",
-    "condition": {
-      "enabled": true,
-      "start_end_mode": "llm"
     }
   },
   "rest_time_range": {
     "description": "用户休息时间",
     "type": "string",
-    "hint": "设定用户的休息时间范围，格式为'H:MM-HH:MM'，例如'22:00-06:00'。在这个时间段内，bot会更积极地催促用户休息。留空表示不限制休息时间。",
+    "hint": "设定用户的休息时间范围，格式为'H:MM-HH:MM'，例如'22:00-06:00'。插件会优先根据最近几天最后一次窗口活动推测休息时间，并在接近该时点时每天仅提醒一次；这里会作为推测样本不足时的兜底范围。",
     "default": "22:00-06:00",
     "condition": {
       "enabled": true
@@ -462,17 +569,74 @@
       "enable_learning": true
     }
   },
+  "bot_appearance": {
+    "description": "Bot 外形描述",
+    "type": "text",
+    "hint": "描述 Bot 的外形特征，用于在屏幕中识别自己。例如：一个蓝色头发的动漫女孩，穿着白色连衣裙，头上有猫耳。",
+    "default": "",
+    "condition": {
+      "enabled": true
+    }
+  },
   "interaction_kpi": {
     "description": "快捷切换配置",
     "type": "int",
     "hint": "通过数字控制互动强度：1=极简，2=轻度，3=中度，4=重度，5=深度",
     "default": 3,
-    "options": [1, 2, 3, 4, 5]
+    "enum": [1, 2, 3, 4, 5]
   },
   "debug": {
     "description": "调试模式",
     "type": "bool",
     "hint": "开启后显示详细日志，关闭时隐藏大部分日志",
     "default": false
+  },
+  "webui": {
+    "description": "Web UI 配置",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用 Web UI",
+        "type": "bool",
+        "hint": "开启后启动 Web UI 服务器，可通过浏览器访问观察记录和日记",
+        "default": false
+      },
+      "host": {
+        "description": "Web UI 主机",
+        "type": "string",
+        "hint": "Web UI 服务器监听的主机地址，0.0.0.0 表示所有网络接口",
+        "default": "0.0.0.0"
+      },
+      "port": {
+        "description": "Web UI 端口",
+        "type": "int",
+        "hint": "Web UI 服务器监听的端口",
+        "default": 6314
+      },
+      "auth_enabled": {
+        "description": "启用 Web UI 认证",
+        "type": "bool",
+        "hint": "开启后访问 Web UI 需要输入密码",
+        "default": true
+      },
+      "password": {
+        "description": "Web UI 密码",
+        "type": "string",
+        "hint": "访问 Web UI 时需要输入的密码，留空表示不需要密码",
+        "default": ""
+      },
+      "session_timeout": {
+        "description": "Web UI 会话超时",
+        "type": "int",
+        "hint": "Web UI 会话的超时时间（秒）",
+        "default": 3600
+      },
+      "allow_external_api": {
+        "description": "允许外部API调用",
+        "type": "bool",
+        "hint": "允许外部系统调用API分析图片，调用需要提供密码认证",
+        "default": false
+      }
+    }
   }
 }
