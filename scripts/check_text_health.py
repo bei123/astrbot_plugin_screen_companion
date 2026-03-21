@@ -75,8 +75,9 @@ def display_path(path: Path) -> str:
 
 
 def main() -> int:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    rc = getattr(sys.stdout, "reconfigure", None)
+    if callable(rc):
+        rc(encoding="utf-8", errors="replace")
 
     parser = argparse.ArgumentParser(
         description="Scan repository text files for likely mojibake and placeholder text."

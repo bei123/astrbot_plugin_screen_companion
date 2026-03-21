@@ -95,6 +95,39 @@
       "enabled": true
     }
   },
+  "recent_chat_context_messages": {
+    "description": "识屏带入的最近对话条数",
+    "type": "int",
+    "hint": "从 AstrBot 当前会话历史中取最近若干条用户/助手文本，拼进识屏提示以增强连贯性。数值越大占用 token 越多，建议约 8～20。",
+    "default": 15,
+    "min": 1,
+    "max": 50,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "companion_outbound_memory_max": {
+    "description": "识屏回复摘要条数（内存）",
+    "type": "int",
+    "hint": "按会话在内存中保留最近几条识屏/主动回复摘要，供下一轮识屏提示模型承接语气、少重复套话。重启 AstrBot 后清空；已创建的会话队列在改小后仍可能保留旧上限直至进程内新建。",
+    "default": 8,
+    "min": 1,
+    "max": 30,
+    "condition": {
+      "enabled": true
+    }
+  },
+  "companion_outbound_snippet_chars": {
+    "description": "每条识屏回复摘要最大长度",
+    "type": "int",
+    "hint": "单条摘要截断长度（按字符计）。过大易占满提示词，过小则上下文信息不足。",
+    "default": 220,
+    "min": 80,
+    "max": 2000,
+    "condition": {
+      "enabled": true
+    }
+  },
   "screen_recognition_mode": {
     "description": "开启视频识别",
     "type": "bool",
@@ -148,6 +181,40 @@
       "screen_recognition_mode": false
     }
   },
+  "capture_source": {
+    "description": "截图来源",
+    "type": "string",
+    "hint": "本机：在运行 AstrBot 的机器上直接截屏（需图形界面）。远程：由 Windows 端常驻程序通过 TCP 推送截图，适用于 Bot 跑在无桌面 Linux 时。选「远程」时需配置下方监听端口并在 Windows 运行推送客户端。",
+    "default": "local",
+    "options": [
+      "local",
+      "remote"
+    ],
+    "condition": {
+      "enabled": true,
+      "screen_recognition_mode": false
+    }
+  },
+  "screen_relay_port": {
+    "description": "远程截图监听端口",
+    "type": "int",
+    "hint": "截图来源为「remote」时插件监听的 TCP 端口（1-65535）。Windows 推送端需连接此端口。",
+    "default": 8765,
+    "condition": {
+      "enabled": true,
+      "capture_source": "remote"
+    }
+  },
+  "screen_relay_bind": {
+    "description": "远程截图监听地址",
+    "type": "string",
+    "hint": "截图来源为「remote」时绑定的地址，默认 0.0.0.0 表示所有网卡。",
+    "default": "0.0.0.0",
+    "condition": {
+      "enabled": true,
+      "capture_source": "remote"
+    }
+  },
   "bot_vision_quality": {
     "description": "Bot 近视程度",
     "type": "int",
@@ -170,10 +237,25 @@
       "enabled": true
     }
   },
+  "vision_source": {
+    "description": "屏幕识别视觉来源",
+    "type": "string",
+    "hint": "仅外接：只用下方外接视觉 API。仅框架：只用 AstrBot 默认图片转述/当前对话多模态模型。外接+框架回退：优先框架识图，无有效结果时再走外接 API。留空时由「优先调用外部视觉API」开关决定（开=仅外接，关=仅框架）。",
+    "default": "",
+    "options": [
+      "",
+      "仅外接",
+      "仅框架",
+      "外接+框架回退"
+    ],
+    "condition": {
+      "enabled": true
+    }
+  },
   "use_external_vision": {
     "description": "优先调用外部视觉API",
     "type": "bool",
-    "hint": "开启后，先把截图或录屏发送给外部视觉 API 做识别，再把识别文本交给 AstrBot 回复；关闭后，会把图片或视频转成 base64 作为多模态消息直接发送给 AstrBot 当前 provider。",
+    "hint": "在「视觉来源」留空时，此项决定仅外接/仅框架；若已选择视觉来源，则以视觉来源为准。开启后倾向走外接 API 识图链路。",
     "default": true,
     "condition": {
       "enabled": true
@@ -407,6 +489,18 @@
       "enable_diary": true
     }
   },
+  "diary_response_prompt": {
+    "description": "查看日记后的回复提示词",
+    "type": "text",
+    "hint": "用户通过命令查看日记后，会异步让当前模型再发一条「被偷看日记」式的简短回复；此处为发给模型的用户侧说明（系统人格仍来自人格设定）。",
+    "default": "用户正在（或刚）查看你写的私密日记。请结合你的人格设定，用一两句简短、口语化的中文回应，可以带点害羞或小抱怨，不要说教、不要复述日记正文。",
+    "editor_mode": true,
+    "editor_language": "text",
+    "condition": {
+      "enabled": true,
+      "enable_diary": true
+    }
+  },
   "weather_api_key": {
     "description": "天气API密钥",
     "type": "string",
@@ -421,6 +515,26 @@
     "type": "string",
     "hint": "用于获取天气信息的城市名称，例如'Beijing'或'上海'。",
     "default": "",
+    "condition": {
+      "enabled": true,
+      "weather_api_key": ""
+    }
+  },
+  "weather_lat": {
+    "description": "纬度（历史天气）",
+    "type": "float",
+    "hint": "OpenWeather One Call Timemachine 接口需要。与「城市名称」无关；查询某日历史天气时请填写所在地纬度（如北京约 39.9）。默认 0 表示未配置，将跳过历史天气接口。",
+    "default": 0,
+    "condition": {
+      "enabled": true,
+      "weather_api_key": ""
+    }
+  },
+  "weather_lon": {
+    "description": "经度（历史天气）",
+    "type": "float",
+    "hint": "与纬度成对填写（如北京约 116.4）。默认 0 表示未配置。",
+    "default": 0,
     "condition": {
       "enabled": true,
       "weather_api_key": ""

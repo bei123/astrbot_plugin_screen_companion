@@ -5,6 +5,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiohttp import web
@@ -72,7 +73,7 @@ class WebServer:
         value = getattr(self.plugin, name, default)
         coerce = getattr(self.plugin, "_coerce_bool", None)
         if callable(coerce):
-            return coerce(value)
+            return bool(coerce(value))
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
@@ -96,20 +97,26 @@ class WebServer:
         return web.json_response({"success": False, "error": msg}, status=status)
 
     # === 中间件 ====
+    _Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
-    async def _error_middleware(self, app: web.Application, handler):
-        async def middleware_handler(request: web.Request):
-            try:
-                return await handler(request)
-            except web.HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Unhandled WebUI error: {e}", exc_info=True)
-                if (request.path or "").startswith("/api/"):
-                    return WebServer._err("Internal Server Error")
-                return web.Response(text="500 Internal Server Error", content_type="text/plain", charset="utf-8", status=500)
-
-        return middleware_handler
+    @web.middleware
+    async def _error_middleware(
+        self, request: web.Request, handler: _Handler
+    ) -> web.StreamResponse:
+        try:
+            return await handler(request)
+        except web.HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Unhandled WebUI error: {e}", exc_info=True)
+            if (request.path or "").startswith("/api/"):
+                return WebServer._err("Internal Server Error")
+            return web.Response(
+                text="500 Internal Server Error",
+                content_type="text/plain",
+                charset="utf-8",
+                status=500,
+            )
 
     def _is_auth_enabled(self) -> bool:
         try:
@@ -164,59 +171,59 @@ class WebServer:
             return False
         return not str(raw_value or "").strip()
 
-    async def _auth_middleware(self, app: web.Application, handler):
-        async def middleware_handler(request: web.Request):
-            if request.method == "OPTIONS":
-                return await handler(request)
-
-            path = request.path or "/"
-            expected = self._get_expected_secret()
-
-            if path in ("/api/analyze", "/api/analyze/base64"):
-                if not self.plugin.webui_allow_external_api:
-                    return WebServer._err("External API disabled", 403)
-
-                if expected:
-                    api_key = request.headers.get("X-API-Key", "")
-                    if not api_key or api_key != expected:
-                        return WebServer._err("Unauthorized", 401)
-                return await handler(request)
-
-            if not expected:
-                return await handler(request)
-
-            if self._is_public_path(path):
-                return await handler(request)
-
-            sid = str(request.cookies.get(self._cookie_name, "") or "").strip()
-            now = time.time()
-
-            if now - self._last_session_cleanup > self._session_cleanup_interval:
-                expired = [k for k, v in self._sessions.items() if v < now]
-                for k in expired:
-                    self._sessions.pop(k, None)
-                self._last_session_cleanup = now
-
-                if len(self._sessions) > self.SESSION_MAX_COUNT:
-                    sorted_sessions = sorted(self._sessions.items(), key=lambda x: x[1])
-                    to_remove = len(self._sessions) - self.SESSION_MAX_COUNT // 2
-                    for k, _ in sorted_sessions[:to_remove]:
-                        self._sessions.pop(k, None)
-                    logger.warning(
-                        f"Session 鏁伴噺瓒呰繃涓婇檺 {self.SESSION_MAX_COUNT}锛屽凡娓呯悊 {to_remove} 涓渶鏃х殑 session"
-                    )
-
-            exp = self._sessions.get(sid)
-            if not exp or exp < now:
-                if sid:
-                    self._sessions.pop(sid, None)
-                if path.startswith("/api/"):
-                    return WebServer._err("Unauthorized", 401)
-                raise web.HTTPUnauthorized(text="Unauthorized")
-
+    @web.middleware
+    async def _auth_middleware(
+        self, request: web.Request, handler: _Handler
+    ) -> web.StreamResponse:
+        if request.method == "OPTIONS":
             return await handler(request)
 
-        return middleware_handler
+        path = request.path or "/"
+        expected = self._get_expected_secret()
+
+        if path in ("/api/analyze", "/api/analyze/base64"):
+            if not self.plugin.webui_allow_external_api:
+                return WebServer._err("External API disabled", 403)
+
+            if expected:
+                api_key = request.headers.get("X-API-Key", "")
+                if not api_key or api_key != expected:
+                    return WebServer._err("Unauthorized", 401)
+            return await handler(request)
+
+        if not expected:
+            return await handler(request)
+
+        if self._is_public_path(path):
+            return await handler(request)
+
+        sid = str(request.cookies.get(self._cookie_name, "") or "").strip()
+        now = time.time()
+
+        if now - self._last_session_cleanup > self._session_cleanup_interval:
+            expired = [k for k, v in self._sessions.items() if v < now]
+            for k in expired:
+                self._sessions.pop(k, None)
+            self._last_session_cleanup = now
+
+            if len(self._sessions) > self.SESSION_MAX_COUNT:
+                sorted_sessions = sorted(self._sessions.items(), key=lambda x: x[1])
+                to_remove = len(self._sessions) - self.SESSION_MAX_COUNT // 2
+                for k, _ in sorted_sessions[:to_remove]:
+                    self._sessions.pop(k, None)
+                logger.warning(
+                    f"Session 数量超过上限 {self.SESSION_MAX_COUNT}，已清理 {to_remove} 个最旧的 session"
+                )
+
+        exp = self._sessions.get(sid)
+        if not exp or exp < now:
+            if sid:
+                self._sessions.pop(sid, None)
+            if path.startswith("/api/"):
+                return WebServer._err("Unauthorized", 401)
+            raise web.HTTPUnauthorized(text="Unauthorized")
+
+        return await handler(request)
 
     def _setup_routes(self):
         # API 路由
@@ -1040,6 +1047,9 @@ class WebServer:
                     "bot_name",
                     "system_prompt",
                     "companion_prompt",
+                    "recent_chat_context_messages",
+                    "companion_outbound_memory_max",
+                    "companion_outbound_snippet_chars",
                     "user_preferences",
                     "enable_natural_language_screen_assist",
                     "use_llm_for_start_end",
@@ -1464,13 +1474,16 @@ class WebServer:
                 activity_history = self.plugin._get_activity_history_for_stats() or []
             else:
                 activity_history = getattr(self.plugin, "activity_history", []) or []
+        records: list[dict[str, Any]] = (
+            activity_history if isinstance(activity_history, list) else []
+        )
         today_start = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
 
         today_work_time = 0
         today_play_time = 0
         today_other_time = 0
 
-        for activity in activity_history:
+        for activity in records:
             if activity.get("start_time", 0) >= today_start:
                 duration = activity.get("duration", 0)
                 activity_type = activity.get("type", "其他")
@@ -1483,22 +1496,22 @@ class WebServer:
 
         total_work_time = sum(
             activity.get("duration", 0)
-            for activity in activity_history
+            for activity in records
             if activity.get("type") == "工作"
         )
         total_play_time = sum(
             activity.get("duration", 0)
-            for activity in activity_history
+            for activity in records
             if activity.get("type") == "摸鱼"
         )
         total_other_time = sum(
             activity.get("duration", 0)
-            for activity in activity_history
+            for activity in records
             if activity.get("type") not in {"工作", "摸鱼"}
         )
 
         recent_activities = sorted(
-            activity_history,
+            records,
             key=lambda x: x.get("start_time", 0),
             reverse=True,
         )[:10]
@@ -1546,7 +1559,7 @@ class WebServer:
                 "total_seconds": int(total_work_time + total_play_time + total_other_time),
             },
             "recent_activities": formatted_activities,
-            "activity_count": len(activity_history),
+            "activity_count": len(records),
         }
 
     async def handle_get_runtime_status(self, request):
@@ -2032,7 +2045,9 @@ class WebServer:
             logger.error(f"图片分析失败: {e}")
             return self._err(str(e))
 
-    async def _analyze_image_logic(self, image_bytes: bytes, custom_prompt: str = None) -> dict:
+    async def _analyze_image_logic(
+        self, image_bytes: bytes, custom_prompt: str | None = None
+    ) -> dict:
         """Analyze an uploaded image and build a companion reply."""
         try:
             if not self.plugin.vision_api_url:

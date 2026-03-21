@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from enum import Enum
 
 from astrbot.api import AstrBotConfig, logger
@@ -31,6 +31,30 @@ class WebuiConfig(BaseModel):
 
 
 class PluginConfig(BaseModel):
+    # 非配置项：由 __init__ 注入，供路径解析与回写 AstrBotConfig
+    _data: AstrBotConfig | dict[str, Any] | None = PrivateAttr(default=None)
+    _plugin_name: str = PrivateAttr(default="astrbot_plugin_screen_companion")
+    _data_dir: Path = PrivateAttr()
+    _observations_dir: Path = PrivateAttr()
+    _diary_dir: Path = PrivateAttr()
+    _learning_dir: Path = PrivateAttr()
+
+    @property
+    def data_dir(self) -> Path:
+        return self._data_dir
+
+    @property
+    def observations_dir(self) -> Path:
+        return self._observations_dir
+
+    @property
+    def diary_dir(self) -> Path:
+        return self._diary_dir
+
+    @property
+    def learning_dir(self) -> Path:
+        return self._learning_dir
+
     # === 基础功能 ===
     bot_name: str = "屏幕助手"
     enabled: bool = False
@@ -43,6 +67,10 @@ class PluginConfig(BaseModel):
     current_preset_index: int = 0  # 当前使用的预设索引
     use_companion_mode: bool = False  # 是否使用陪伴模式（开启为陪伴模式，关闭为偷看模式）
     companion_prompt: str = "你需要想象自己真实地将持续待在用户身边并与用户一起观看其屏幕内容，并实时地与用户进行互动。"
+    # 识屏连贯性：会话历史条数、内存中最近回复摘要（重启后清空）
+    recent_chat_context_messages: int = 15
+    companion_outbound_memory_max: int = 8
+    companion_outbound_snippet_chars: int = 220
     capture_active_window: bool = False  # 是否只截取活动窗口
     bot_vision_quality: int = 85
     image_prompt: str = "请用尽量少的字分析这张屏幕截图，只输出高价值信息。优先判断：1. 用户当前在做什么任务 2. 进行到哪一步 3. 画面里最关键的线索或异常 4. 如果需要互动，最值得给出的一个任务相关建议点。避免大段描述界面，不要重复无意义细节，控制在4行内。"
@@ -74,8 +102,16 @@ class PluginConfig(BaseModel):
     diary_recall_time: int = 30
     diary_send_as_image: bool = False
     diary_generation_prompt: str = "请根据今天的观察记录，写一篇日记总结，记录今天的观察和感受，融入你的性格和情感。不要只是对观察记录的生硬总结，而是要融合你的经历和情感，生成一个更个人化的日记。请字数控制在400字左右。"
+    # 用户查看日记后，模型生成一条「被偷看」的简短回复时使用的用户侧提示
+    diary_response_prompt: str = (
+        "用户正在（或刚）查看你写的私密日记。请结合你的人格设定，用一两句简短、口语化的中文回应，"
+        "可以带点害羞或小抱怨，不要说教、不要复述日记正文。"
+    )
     weather_api_key: str = ""
     weather_city: str = ""
+    # OpenWeather One Call Timemachine 需要经纬度；与 weather_city 独立，日记历史天气用
+    weather_lat: float = 0.0
+    weather_lon: float = 0.0
     enable_mic_monitor: bool = False
     mic_threshold: int = 60
     mic_check_interval: int = 5
@@ -90,6 +126,12 @@ class PluginConfig(BaseModel):
     window_companion_check_interval: int = 5
     use_shared_screenshot_dir: bool = False
     shared_screenshot_dir: str = ""
+    # 截图来源：本机 pyautogui；remote 时由 Windows 端经 TCP 推送（见 screen_relay_*）
+    capture_source: str = "local"
+    screen_relay_port: int = 8765
+    screen_relay_bind: str = "0.0.0.0"
+    # 空字符串表示沿用 use_external_vision：true→仅外接，false→仅框架
+    vision_source: str = ""
     custom_tasks: str = ""
     rest_time_range: str = "22:00-06:00"
     enable_learning: bool = True
@@ -182,6 +224,39 @@ class PluginConfig(BaseModel):
             raise ValueError('diary_recall_time 不能小于 0')
         return v
 
+    @field_validator('recent_chat_context_messages')
+    @classmethod
+    def validate_recent_chat_context_messages(cls, v):
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise ValueError('recent_chat_context_messages 必须是整数')
+        if n < 1 or n > 50:
+            raise ValueError('recent_chat_context_messages 必须在 1-50 之间')
+        return n
+
+    @field_validator('companion_outbound_memory_max')
+    @classmethod
+    def validate_companion_outbound_memory_max(cls, v):
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise ValueError('companion_outbound_memory_max 必须是整数')
+        if n < 1 or n > 30:
+            raise ValueError('companion_outbound_memory_max 必须在 1-30 之间')
+        return n
+
+    @field_validator('companion_outbound_snippet_chars')
+    @classmethod
+    def validate_companion_outbound_snippet_chars(cls, v):
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise ValueError('companion_outbound_snippet_chars 必须是整数')
+        if n < 80 or n > 2000:
+            raise ValueError('companion_outbound_snippet_chars 必须在 80-2000 之间')
+        return n
+
     @field_validator('mic_threshold')
     @classmethod
     def validate_mic_threshold(cls, v):
@@ -195,6 +270,31 @@ class PluginConfig(BaseModel):
         if v < 1:
             raise ValueError('mic_check_interval 不能小于 1 秒')
         return v
+
+    @field_validator('capture_source', mode='before')
+    @classmethod
+    def validate_capture_source(cls, v):
+        s = str(v or 'local').strip().lower()
+        return 'remote' if s == 'remote' else 'local'
+
+    @field_validator('screen_relay_port')
+    @classmethod
+    def validate_screen_relay_port(cls, v):
+        try:
+            p = int(v)
+        except (TypeError, ValueError):
+            raise ValueError('screen_relay_port 必须是整数')
+        if p < 1 or p > 65535:
+            raise ValueError('screen_relay_port 必须在 1-65535 之间')
+        return p
+
+    @field_validator('vision_source', mode='before')
+    @classmethod
+    def validate_vision_source(cls, v):
+        s = str(v or '').strip()
+        if s in ('仅外接', '仅框架', '外接+框架回退'):
+            return s
+        return ''
 
     @field_validator('memory_threshold')
     @classmethod
@@ -260,14 +360,13 @@ class PluginConfig(BaseModel):
 
         # 2. 保存 AstrBotConfig 引用以便回写
         object.__setattr__(self, "_data", config)
-        object.__setattr__(self, "_plugin_name", "astrbot_plugin_screen_companion")
 
         # 3. 初始化路径和目录
         data_dir = StarTools.get_data_dir(self._plugin_name)
-        object.__setattr__(self, "data_dir", data_dir)
-        object.__setattr__(self, "observations_dir", data_dir / "observations")
-        object.__setattr__(self, "diary_dir", data_dir / "diary")
-        object.__setattr__(self, "learning_dir", data_dir / "learning")
+        object.__setattr__(self, "_data_dir", data_dir)
+        object.__setattr__(self, "_observations_dir", data_dir / "observations")
+        object.__setattr__(self, "_diary_dir", data_dir / "diary")
+        object.__setattr__(self, "_learning_dir", data_dir / "learning")
 
         # 确保目录存在
         self.ensure_base_dirs()
@@ -300,10 +399,36 @@ class PluginConfig(BaseModel):
             logger.error(f"[Config] 写入 JSON 文件时发生未知错误 {path}: {e}")
             return False
 
+    def _persist_to_backing(self, updates: dict[str, Any]) -> None:
+        d = self._data
+        if d is None:
+            return
+        if isinstance(d, dict):
+            d.update(updates)
+            return
+        try:
+            d.save_config(updates)
+        except Exception:
+            pass
+
+    def _persist_key_to_backing(self, key: str, value: Any) -> None:
+        d = self._data
+        if d is None:
+            return
+        if isinstance(d, dict):
+            d[key] = value
+            return
+        try:
+            if key == "webui" and isinstance(value, WebuiConfig):
+                d.save_config({key: value.model_dump()})
+            else:
+                d.save_config({key: value})
+        except Exception:
+            pass
+
     def save_webui_config(self) -> None:
         """保存 WebUI 配置。"""
-        if hasattr(self, "_data") and hasattr(self._data, "save_config"):
-            self._data.save_config({"webui": self.webui.model_dump()})
+        self._persist_to_backing({"webui": self.webui.model_dump()})
 
     def __setattr__(self, key: str, value: Any):
         # 更新 Pydantic 模型
@@ -311,28 +436,15 @@ class PluginConfig(BaseModel):
 
         # 如果是私有属性或路径属性，跳过回写
         if key.startswith("_") or key in (
-            "data_dir",
-            "observations_dir",
-            "diary_dir",
-            "learning_dir",
+            "_data_dir",
+            "_observations_dir",
+            "_diary_dir",
+            "_learning_dir",
         ):
             return
 
         # 回写到 AstrBotConfig
-        if hasattr(self, "_data") and self._data is not None:
-            if hasattr(self._data, "save_config"):
-                try:
-                    # 对于 webui 这种嵌套模型，如果是直接替换整个 webui 对象，这里可以处理
-                    # 但如果是修改 webui.port，不会触发这里的 __setattr__
-                    # 需要手动调用 save_webui_config
-                    if key == "webui" and isinstance(value, WebuiConfig):
-                        self._data.save_config({key: value.model_dump()})
-                    else:
-                        self._data.save_config({key: value})
-                except Exception:
-                    pass
-            elif isinstance(self._data, dict):
-                self._data[key] = value
+        self._persist_key_to_backing(key, value)
 
     def update_config(self, updates: dict) -> bool:
         """批量更新配置项。"""
@@ -341,11 +453,7 @@ class PluginConfig(BaseModel):
                 setattr(self, key, value)
 
             # 回写到 AstrBotConfig
-            if hasattr(self, "_data") and self._data is not None:
-                if hasattr(self._data, "save_config"):
-                    self._data.save_config(updates)
-                elif isinstance(self._data, dict):
-                    self._data.update(updates)
+            self._persist_to_backing(dict(updates))
             return True
         except Exception as e:
             logger.error(f"更新配置失败: {e}")
