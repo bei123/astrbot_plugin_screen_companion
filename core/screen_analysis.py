@@ -665,7 +665,11 @@ async def analyze_screen(
 
     if host.save_local:
         try:
-            data_dir = StarTools.get_data_dir()
+            plugin_name = str(
+                getattr(getattr(host, "plugin_config", None), "_plugin_name", "")
+                or "astrbot_plugin_screen_companion"
+            )
+            data_dir = StarTools.get_data_dir(plugin_name=plugin_name)
             data_dir.mkdir(parents=True, exist_ok=True)
             screenshot_path = str(data_dir / "screen_shot_latest.jpg")
             shutil.copy2(temp_file_path, screenshot_path)
