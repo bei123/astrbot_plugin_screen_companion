@@ -47,9 +47,9 @@ def check_dependencies(sc: Any, check_mic: bool = False) -> tuple[bool, str]:
         and str(getattr(sc, "capture_source", "local") or "").strip().lower() != "remote"
     ):
         try:
-            import pyaudio  # noqa: F401
+            import sounddevice  # noqa: F401
         except ImportError:
-            missing_libs.append("pyaudio")
+            missing_libs.append("sounddevice")
 
         try:
             import numpy  # noqa: F401
@@ -133,6 +133,9 @@ def check_screenshot_env(sc: Any, check_mic: bool = False) -> tuple[bool, str]:
     dep_ok, dep_msg = check_dependencies(sc, check_mic=check_mic)
     if not dep_ok and "ffmpeg" not in str(dep_msg or "").lower():
         return False, dep_msg
+
+    if str(getattr(sc, "capture_source", "local") or "").strip().lower() == "remote":
+        return True, ""
 
     try:
         import pyautogui
