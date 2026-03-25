@@ -12,7 +12,7 @@
 
 依赖（Windows）:
   pip install pyautogui Pillow pygetwindow
-  启用麦克风时: pip install pyaudio numpy
+  启用麦克风时: pip install sounddevice numpy
 """
 
 import io
@@ -42,7 +42,7 @@ def _check_deps():
 
 def _check_mic_deps():
     try:
-        import pyaudio
+        import sounddevice  # noqa: F401
         import numpy
         return True
     except ImportError:
@@ -223,7 +223,7 @@ def run_gui():
     mr += 1
     if not _has_mic_libs:
         cb_mic.config(state=tk.DISABLED)
-        ttk.Label(form_mic, text="需要安装 pyaudio、numpy", style="Hint.TLabel").grid(
+        ttk.Label(form_mic, text="需要安装 sounddevice、numpy", style="Hint.TLabel").grid(
             row=mr, column=0, columnspan=2, sticky=tk.W, pady=(4, 0)
         )
         mr += 1
@@ -327,26 +327,25 @@ def run_gui():
             screenshot.save(buf, format="JPEG", quality=quality)
             return buf.getvalue(), active_window_title
 
-        def get_mic_volume(stream_and_p=None):
+        def get_mic_volume():
             if not use_mic:
                 return 0
             try:
-                import pyaudio
                 import numpy as np
-                if stream_and_p is not None:
-                    stream, _ = stream_and_p
-                    data = stream.read(1024, exception_on_overflow=False)
-                else:
-                    p = pyaudio.PyAudio()
-                    stream = p.open(
-                        format=pyaudio.paInt16, channels=1, rate=44100,
-                        input=True, frames_per_buffer=1024,
-                    )
-                    data = stream.read(1024)
-                    stream.stop_stream()
-                    stream.close()
-                    p.terminate()
-                audio_data = np.frombuffer(data, dtype=np.int16)
+                import sounddevice as sd
+
+                frames = 1024
+                sample_rate = 44100
+                data = sd.rec(
+                    frames=frames,
+                    samplerate=sample_rate,
+                    channels=1,
+                    dtype="float32",
+                    blocking=True,
+                )
+                if data is None:
+                    return 0
+                audio_data = np.asarray(data, dtype=np.float32).reshape(-1)
                 if audio_data.size == 0:
                     return 0
                 sq = np.square(audio_data.astype(np.float64))
@@ -354,7 +353,8 @@ def run_gui():
                 if not (mean_sq > 0 and np.isfinite(mean_sq)):
                     return 0
                 rms = np.sqrt(mean_sq)
-                return min(100, int(rms / 32768 * 100 * 5))
+                # float32 in [-1,1]
+                return min(100, int(rms * 100 * 5))
             except Exception:
                 return 0
 
@@ -383,29 +383,17 @@ def run_gui():
                 s.connect((host, port))
                 s.settimeout(None)
                 app.after(0, lambda: (var_status.set("已连接，正在推送"), log("已连接，开始推送截图" + (" + 麦克风" if use_mic else ""))))
-                stream_and_p = None
-                if use_mic:
-                    try:
-                        import pyaudio
-                        p = pyaudio.PyAudio()
-                        stream = p.open(
-                            format=pyaudio.paInt16, channels=1, rate=44100,
-                            input=True, frames_per_buffer=1024,
-                        )
-                        stream_and_p = (stream, p)
-                    except Exception as e:
-                        app.after(0, lambda e=e: log(f"麦克风打开失败: {e}"))
                 last_frame_time = time.time()
                 try:
                     while not stop_event.is_set():
                         now = time.time()
                         if now - last_frame_time >= interval:
                             image_bytes, title = capture_once()
-                            mic_level = get_mic_volume(stream_and_p) if use_mic else 0
+                            mic_level = get_mic_volume() if use_mic else 0
                             send_frame(s, image_bytes, title, mic_level)
                             last_frame_time = now
-                        elif use_mic and stream_and_p is not None:
-                            mic_level = get_mic_volume(stream_and_p)
+                        elif use_mic:
+                            mic_level = get_mic_volume()
                             s.sendall(b"\xFE" + bytes([min(100, max(0, mic_level))]))
                         sleep_time = min(mic_interval, interval - (now - last_frame_time)) if use_mic else (interval - (now - last_frame_time))
                         sleep_time = max(0.01, min(sleep_time, interval))
@@ -414,17 +402,6 @@ def run_gui():
                             time.sleep(0.05)
                 finally:
                     worker_socket = None
-                    if stream_and_p is not None:
-                        stream, p = stream_and_p
-                        try:
-                            stream.stop_stream()
-                            stream.close()
-                        except Exception:
-                            pass
-                        try:
-                            p.terminate()
-                        except Exception:
-                            pass
                     try:
                         s.close()
                     except Exception:

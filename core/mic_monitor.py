@@ -10,98 +10,99 @@ from typing import Any
 from astrbot.api import logger
 
 
-def resolve_microphone_input_device(host: Any, pyaudio_instance: Any) -> tuple[int | None, dict | None]:
+def resolve_microphone_input_device(host: Any) -> tuple[int | None, dict | None]:
+    """解析要使用的麦克风输入设备。"""
+    try:
+        import sounddevice as sd
+    except ImportError:
+        return None, None
+
     cached_index = getattr(host, "_mic_input_device_index", None)
     if cached_index is not None:
         try:
-            cached_info = pyaudio_instance.get_device_info_by_index(int(cached_index))
-            if int(cached_info.get("maxInputChannels", 0) or 0) > 0:
-                return int(cached_info["index"]), cached_info
+            info = sd.query_devices(int(cached_index), kind="input")
+            if info and int(info.get("max_input_channels", 0) or 0) > 0:
+                return int(cached_index), dict(info)
         except Exception:
             host._mic_input_device_index = None
             host._mic_input_device_name = ""
 
-    candidates = []
-    try:
-        default_info = pyaudio_instance.get_default_input_device_info()
-        if int(default_info.get("maxInputChannels", 0) or 0) > 0:
-            candidates.append(default_info)
-    except Exception:
-        default_info = None
+    candidates: list[tuple[int, dict]] = []
 
     try:
-        device_count = int(pyaudio_instance.get_device_count() or 0)
+        default = sd.default.device
+        default_input = None
+        if isinstance(default, (tuple, list)) and len(default) >= 1:
+            default_input = default[0]
+        if default_input is not None and int(default_input) >= 0:
+            info = sd.query_devices(int(default_input), kind="input")
+            if info and int(info.get("max_input_channels", 0) or 0) > 0:
+                candidates.append((int(default_input), dict(info)))
     except Exception:
-        device_count = 0
+        pass
 
-    for index in range(device_count):
-        try:
-            info = pyaudio_instance.get_device_info_by_index(index)
-        except Exception:
-            continue
-        if int(info.get("maxInputChannels", 0) or 0) <= 0:
-            continue
-        if any(int(existing.get("index", -1)) == int(info.get("index", -2)) for existing in candidates):
-            continue
-        candidates.append(info)
+    try:
+        for idx, dev in enumerate(sd.query_devices() or []):
+            try:
+                if int(dev.get("max_input_channels", 0) or 0) <= 0:
+                    continue
+                if any(existing_idx == idx for existing_idx, _ in candidates):
+                    continue
+                candidates.append((idx, dict(dev)))
+            except Exception:
+                continue
+    except Exception:
+        pass
 
     if not candidates:
         return None, None
 
-    info = candidates[0]
-    try:
-        device_index = int(info.get("index"))
-    except Exception:
-        return None, None
-
-    host._mic_input_device_index = device_index
+    device_index, info = candidates[0]
+    host._mic_input_device_index = int(device_index)
     host._mic_input_device_name = str(info.get("name", "") or "")
-    return device_index, info
+    return int(device_index), info
 
 
 def get_microphone_volume(host: Any) -> int:
     """读取当前麦克风音量（0–100）。"""
     host._ensure_runtime_state()
-    p = None
-    stream = None
     try:
         import numpy as np
-        import pyaudio
 
-        p = pyaudio.PyAudio()
-        device_index, device_info = resolve_microphone_input_device(host, p)
+        import sounddevice as sd
+        import soundfile  # noqa: F401
+
+        device_index, device_info = resolve_microphone_input_device(host)
         if device_info is None:
             logger.warning("未找到可用的麦克风输入设备，已跳过本轮音量检测")
             return 0
 
-        sample_rate = int(float(device_info.get("defaultSampleRate", 44100) or 44100))
+        sample_rate = int(float(device_info.get("default_samplerate", 44100) or 44100))
+        sample_rate = max(8000, sample_rate)
         frames_per_buffer = 2048
-        stream = p.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=max(8000, sample_rate),
-            input=True,
-            input_device_index=device_index,
-            frames_per_buffer=frames_per_buffer,
-            start=False,
-        )
-        stream.start_stream()
 
-        chunks = []
+        chunks: list[Any] = []
         for chunk_index in range(4):
-            raw = stream.read(frames_per_buffer, exception_on_overflow=False)
-            if not raw:
+            data = sd.rec(
+                frames=frames_per_buffer,
+                samplerate=sample_rate,
+                channels=1,
+                dtype="float32",
+                device=device_index,
+                blocking=True,
+            )
+            if data is None:
                 continue
             if chunk_index == 0:
                 continue
-            chunk = np.frombuffer(raw, dtype=np.int16)
-            if chunk.size:
-                chunks.append(chunk.astype(np.float32))
+            arr = np.asarray(data, dtype=np.float32).reshape(-1)
+            if arr.size:
+                chunks.append(arr)
 
         if not chunks:
             return 0
 
-        audio_data = np.concatenate(chunks)
+        audio_data = np.concatenate(chunks).astype(np.float32, copy=False)
         if audio_data.size == 0:
             return 0
 
@@ -113,7 +114,8 @@ def get_microphone_volume(host: Any) -> int:
         if not np.isfinite(rms) or rms <= 0:
             return 0
 
-        volume = min(100, max(0, int(rms / 32768.0 * 100 * 5)))
+        # sounddevice(float32) typically returns in [-1.0, 1.0]
+        volume = min(100, max(0, int(rms * 100 * 5)))
         return volume
     except ImportError:
         logger.debug("麦克风监听依赖未安装，无法读取音量")
@@ -121,21 +123,6 @@ def get_microphone_volume(host: Any) -> int:
     except Exception as e:
         logger.error(f"获取麦克风音量失败: {e}")
         return 0
-    finally:
-        if stream is not None:
-            try:
-                stream.stop_stream()
-            except Exception:
-                pass
-            try:
-                stream.close()
-            except Exception:
-                pass
-        if p is not None:
-            try:
-                p.terminate()
-            except Exception:
-                pass
 
 
 def ensure_mic_monitor_background_task(host: Any) -> None:
@@ -168,10 +155,15 @@ async def mic_monitor_task(host: Any) -> None:
         logger.info(f"[麦克风依赖检查] Python 路径: {sys.path}")
         logger.info(f"[麦克风依赖检查] Python 可执行文件: {sys.executable}")
 
-        import pyaudio
+        import sounddevice as sd
+
+        logger.info("[麦克风依赖检查] sounddevice 已加载")
+        logger.info(f"[麦克风依赖检查] 默认音频设备: {getattr(sd, 'default', None)}")
+
+        import soundfile
 
         logger.info(
-            f"[麦克风依赖检查] PyAudio 已加载: {getattr(pyaudio, '__version__', '?')}"
+            f"[麦克风依赖检查] soundfile 已加载: {getattr(soundfile, '__version__', '?')}"
         )
 
         import numpy
@@ -181,7 +173,7 @@ async def mic_monitor_task(host: Any) -> None:
         mic_deps_ok = True
     except ImportError as e:
         logger.warning(f"[麦克风依赖检查] 未安装麦克风监听所需依赖: {e}")
-        logger.warning("请执行 pip install pyaudio numpy 以启用麦克风监听功能")
+        logger.warning("请执行 pip install sounddevice soundfile numpy 以启用麦克风监听功能")
         logger.warning(f"[麦克风依赖检查] 详细错误: {traceback.format_exc()}")
 
     while host.enable_mic_monitor and host._is_current_process_instance():

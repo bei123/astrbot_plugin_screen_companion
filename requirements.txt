@@ -3,7 +3,7 @@ numpy
 aiohttp
 psutil
 
-# UI/desktop interaction deps: Windows-only
-pyautogui; platform_system == "Windows"
-pygetwindow; platform_system == "Windows"
-pyaudio; platform_system == "Windows"
+pyautogui
+pygetwindow
+sounddevice
+soundfile
