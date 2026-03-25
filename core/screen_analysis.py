@@ -203,7 +203,10 @@ async def analyze_screen(
 ) -> list[BaseMessageComponent]:
     """Analyze the current screenshot or recording context and generate a reply."""
     should_send_rest_reminder, rest_reminder_info = host._should_send_rest_reminder()
-    if host._is_in_rest_time_range() and not (should_send_rest_reminder and not custom_prompt):
+    is_manual_task = str(task_id or "").startswith("manual")
+    if host._is_in_rest_time_range() and not is_manual_task and not (
+        should_send_rest_reminder and not custom_prompt
+    ):
         logger.info(f"[任务 {task_id}] 当前处于休息时段，跳过识屏。")
         return []
 
