@@ -1,0 +1,18 @@
+[Unit]
+Description=AstrBot Docker screenshot bridge
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+Environment=SCREENSHOT_OUTPUT_DIR=/srv/astrbot/screenshots
+Environment=SCREENSHOT_INTERVAL=5
+Environment=SCREENSHOT_QUALITY=85
+Environment=SCREENSHOT_HISTORY_LIMIT=120
+Environment=DISPLAY=:0
+ExecStart=/bin/sh /path/to/astrbot_plugin_screen_companion/scripts/start_docker_screenshot_bridge_linux.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

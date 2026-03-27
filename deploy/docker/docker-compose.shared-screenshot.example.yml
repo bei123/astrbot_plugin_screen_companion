@@ -1,0 +1,17 @@
+services:
+  astrbot:
+    image: your-astrbot-image:latest
+    container_name: astrbot
+    restart: unless-stopped
+    ports:
+      - "6314:6314"
+    volumes:
+      - ./screenshots:/data/screenshots
+      - ./plugins:/AstrBot/data/plugins
+      - ./plugin_data:/AstrBot/data/plugin_data
+
+    # Replace the image, plugin mount path, and data paths with your own setup.
+    # Then enable shared screenshot mode in the plugin config:
+    #   screen_recognition_mode=false
+    #   use_shared_screenshot_dir=true
+    #   shared_screenshot_dir=/data/screenshots

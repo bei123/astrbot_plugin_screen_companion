@@ -7,8 +7,7 @@ astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能
 ## 版本
 
 当前版本：`2.8.0`
-
-该版本已完成主文件拆分，并补上学习链路、模式感知、任务收尾感、学习回滚，以及日记提示词与排版优化等一整轮体验优化。当前重点已转向稳态维护和细节打磨。
+`2.8.0` 版本已完成主文件拆分，并补上学习链路、模式感知、任务收尾感、学习回滚，以及日记提示词与排版优化等一整轮体验优化。当前重点已转向稳态维护和细节打磨。
 
 ## 主要功能
 
@@ -59,6 +58,162 @@ pip install -r requirements.txt
 3. 重启 AstrBot。
 
 注意：插件目录名必须是 `astrbot_plugin_screen_companion`，不要带版本号后缀。
+
+## Docker 部署适配
+
+这个插件的核心能力依赖图形桌面环境，因此不建议指望容器直接截取宿主机桌面。对于 Docker 用户，推荐使用“宿主机截图 + 容器读取共享目录”的方式。
+
+仓库内已经提供了一个独立的小工具：
+
+```text
+scripts/docker_screenshot_bridge.py
+```
+
+它需要运行在宿主机上，负责定时截图并写入共享目录；容器内的插件再从这个目录读取最新截图。
+
+### 适用场景
+
+- AstrBot 运行在 Docker 容器中
+- 宿主机有图形桌面，可以正常截图
+- 你只需要截图识别，不需要录屏模式
+
+### 1. 宿主机运行截图桥接工具
+
+先在宿主机安装依赖：
+
+```bash
+pip install Pillow pyautogui
+```
+
+然后运行：
+
+```bash
+python scripts/docker_screenshot_bridge.py --output-dir /path/to/screenshots --interval 5 --verbose
+```
+
+常用参数：
+
+- `--output-dir`：共享截图目录，必填
+- `--interval`：截图间隔秒数，默认 5
+- `--quality`：JPEG 质量，默认 85
+- `--history-limit`：最多保留多少张历史截图，默认 120
+- `--once`：只截一张就退出，适合排查环境
+
+工具会持续生成这两类文件：
+
+- `screenshot_latest.jpg`
+- `screenshot_时间戳.jpg`
+
+如果你不想每次手敲命令，也可以直接用仓库内的启动脚本：
+
+- Windows：`scripts/start_docker_screenshot_bridge_windows.bat`
+- Linux：`scripts/start_docker_screenshot_bridge_linux.sh`
+
+如果你想进一步做成自动启动，也可以直接使用安装脚本：
+
+- Windows 计划任务：`deploy/docker/install_windows_task_scheduler.ps1`
+- Linux 用户级 systemd：`deploy/docker/install_linux_systemd_user.sh`
+
+### 2. 挂载共享目录到容器
+
+例如 `docker-compose.yml`：
+
+```yaml
+services:
+  astrbot:
+    volumes:
+      - ./screenshots:/data/screenshots
+    ports:
+      - "6314:6314"
+```
+
+仓库里也附带了示例文件，可直接改后使用：
+
+- `deploy/docker/docker-compose.shared-screenshot.example.yml`
+
+### 3. 插件内开启共享截图目录模式
+
+请确认以下配置：
+
+```json
+{
+  "enabled": true,
+  "screen_recognition_mode": false,
+  "use_shared_screenshot_dir": true,
+  "shared_screenshot_dir": "/data/screenshots",
+  "webui": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 6314,
+    "auth_enabled": true,
+    "password": "请改成你自己的密码"
+  }
+}
+```
+
+注意：
+
+- `screen_recognition_mode` 必须为 `false`，也就是截图模式
+- `use_shared_screenshot_dir` 必须为 `true`
+- `shared_screenshot_dir` 填容器内路径，不是宿主机路径
+- 如果开启 WebUI 并需要浏览器访问，请映射对应端口
+
+### Linux 开机自启示例
+
+如果你想让宿主机在 Linux 桌面环境下自动启动截图桥接工具，可以参考：
+
+```text
+deploy/docker/astrbot-screen-bridge.service
+```
+
+使用前需要至少修改两处：
+
+- 把 `ExecStart` 改成你本机插件目录的绝对路径
+- 把 `SCREENSHOT_OUTPUT_DIR` 改成你的共享截图目录
+
+如果你的桌面会话不是 `DISPLAY=:0`，也要同步调整。
+
+如果你更希望自动生成并启用用户级服务，也可以直接运行：
+
+```bash
+sh deploy/docker/install_linux_systemd_user.sh --output-dir /srv/astrbot/screenshots
+```
+
+启用后常用排查命令：
+
+```bash
+systemctl --user status astrbot-screen-bridge.service
+journalctl --user -u astrbot-screen-bridge.service -f
+```
+
+### Windows 自动启动示例
+
+在 Windows 宿主机上，可以用计划任务让桥接工具在登录后自动运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\docker\install_windows_task_scheduler.ps1 -OutputDir C:\astrbot\screenshots
+```
+
+安装完成后：
+
+- 打开“任务计划程序”可以看到 `AstrBot Screen Bridge`
+- 注销并重新登录后会自动启动
+- 也可以在任务计划程序里手动点一次“运行”做测试
+
+### 4. 启动后建议这样检查
+
+1. 先在宿主机执行桥接工具，确认共享目录里已经持续生成截图
+2. 再启动 AstrBot 容器
+3. 使用 `/kp` 测试一次即时识屏
+4. 使用 `/kpi status` 查看环境检查结果
+5. 使用 `/kpi start` 启动自动观察
+
+### Docker 场景限制
+
+- 共享截图目录模式仅适用于截图模式，不适用于录屏模式
+- 宿主机必须保持图形桌面会话可用
+- Linux 宿主机通常需要在有 `DISPLAY` 或 `WAYLAND_DISPLAY` 的桌面会话中运行该工具
+- 如果截图长期不更新，插件会认为截图已过期并尝试回退到实时截图
 
 ## ffmpeg 安装
 
