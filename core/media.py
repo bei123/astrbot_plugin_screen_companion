@@ -1179,6 +1179,35 @@ class ScreenCompanionMediaMixin:
             task.cancel()
         self._mic_monitor_background_task = None
 
+    def _get_missing_mic_dependencies(self) -> list[str]:
+        """返回当前缺失或不可用的麦克风监听依赖。"""
+        missing_libs = []
+        for module_name in ("pyaudio", "numpy"):
+            try:
+                __import__(module_name)
+            except Exception:
+                missing_libs.append(module_name)
+        return missing_libs
+
+    def _format_missing_dependency_message(self, missing_libs: list[str]) -> str:
+        """生成缺失依赖提示文案。"""
+        unique_missing_libs = list(dict.fromkeys(missing_libs))
+        if not unique_missing_libs:
+            return ""
+
+        install_cmd = f"pip install {' '.join(unique_missing_libs)}"
+        message = f"缺少依赖：{', '.join(unique_missing_libs)}。请执行：{install_cmd}"
+
+        mic_missing = [lib for lib in unique_missing_libs if lib in {"pyaudio", "numpy"}]
+        if mic_missing:
+            message += "。如果只是想启用麦克风监听，也可以执行：pip install -r requirements-optional-mic.txt"
+            if "pyaudio" in mic_missing:
+                if sys.platform.startswith("linux"):
+                    message += "。Linux 还需要先安装 PortAudio 开发包，例如：sudo apt install portaudio19-dev"
+                elif sys.platform == "darwin":
+                    message += "。macOS 如安装失败，请先安装 PortAudio，例如：brew install portaudio"
+        return message
+
     async def _mic_monitor_task(self):
         """后台麦克风监听任务。"""
         self._ensure_runtime_state()
@@ -1199,9 +1228,15 @@ class ScreenCompanionMediaMixin:
             logger.info(f"[麦克风依赖检查] NumPy 已加载: {numpy.__version__}")
 
             mic_deps_ok = True
-        except ImportError as e:
-            logger.warning(f"[麦克风依赖检查] 未安装麦克风监听所需依赖: {e}")
-            logger.warning("请执行 pip install pyaudio numpy 以启用麦克风监听功能")
+        except Exception as e:
+            missing_mic_libs = self._get_missing_mic_dependencies()
+            logger.warning(f"[麦克风依赖检查] 麦克风监听依赖不可用: {e}")
+            if missing_mic_libs:
+                logger.warning(self._format_missing_dependency_message(missing_mic_libs))
+            elif sys.platform.startswith("linux"):
+                logger.warning(
+                    "[麦克风依赖检查] PyAudio 初始化失败，请确认已安装 PortAudio 相关系统库，并授予麦克风权限。"
+                )
             import traceback
 
             logger.warning(f"[麦克风依赖检查] 详细错误: {traceback.format_exc()}")
@@ -1979,15 +2014,7 @@ class ScreenCompanionMediaMixin:
 
         # 检查麦克风监控依赖
         if check_mic and self.enable_mic_monitor:
-            try:
-                import pyaudio
-            except ImportError:
-                missing_libs.append("pyaudio")
-
-            try:
-                import numpy
-            except ImportError:
-                missing_libs.append("numpy")
+            missing_libs.extend(self._get_missing_mic_dependencies())
 
         if missing_libs:
             if missing_libs == ["ffmpeg"]:
@@ -1998,7 +2025,7 @@ class ScreenCompanionMediaMixin:
                 )
             return (
                 False,
-                f"缂哄皯蹇呰渚濊禆搴? {', '.join(missing_libs)}銆傝鎵ц: pip install {' '.join(missing_libs)}",
+                self._format_missing_dependency_message(missing_libs),
             )
         return True, ""
 
@@ -2107,6 +2134,136 @@ class ScreenCompanionMediaMixin:
         )
         return f"{base_prompt.rstrip()}{supplemental}"
 
+    def _collect_start_end_reference_lines(self, limit: int | None = None) -> list[str]:
+        """收集最近几条可供开始/结束文案参考的识屏结果与回复。"""
+        self._ensure_runtime_state()
+        try:
+            max_items = int(
+                limit
+                if limit is not None
+                else getattr(self, "START_END_CONTEXT_LOOKBACK", 2)
+            )
+        except Exception:
+            max_items = 2
+
+        if max_items <= 0:
+            return []
+
+        context_lines: list[str] = []
+        seen_signatures: set[str] = set()
+
+        recent_traces: list[dict[str, Any]] = []
+        if hasattr(self, "_get_recent_screen_analysis_traces"):
+            recent_traces = self._get_recent_screen_analysis_traces(
+                limit=max(max_items * 3, max_items)
+            ) or []
+
+        for trace in recent_traces:
+            if not isinstance(trace, dict):
+                continue
+            status = str(trace.get("status", "") or "").strip().lower()
+            if status.startswith("error"):
+                continue
+
+            scene = self._normalize_scene_label(trace.get("scene", ""))
+            if scene == "未知":
+                scene = ""
+            window_title = self._normalize_window_title(
+                trace.get("active_window_title", "")
+                or trace.get("latest_window_title", "")
+                or ""
+            )
+            recognition_summary = self._truncate_preview_text(
+                trace.get("recognition_summary", ""),
+                limit=80,
+            )
+            reply_preview = self._truncate_preview_text(
+                trace.get("reply_preview", ""),
+                limit=80,
+            )
+            if not any((scene, window_title, recognition_summary, reply_preview)):
+                continue
+
+            signature = "|".join(
+                (scene, window_title, recognition_summary, reply_preview)
+            )
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+
+            parts: list[str] = []
+            if scene:
+                parts.append(f"场景：{scene}")
+            if window_title:
+                parts.append(f"窗口：{window_title}")
+            if recognition_summary:
+                parts.append(f"识屏：{recognition_summary}")
+            if reply_preview:
+                parts.append(f"回复：{reply_preview}")
+
+            if parts:
+                context_lines.append("- " + "；".join(parts))
+            if len(context_lines) >= max_items:
+                return context_lines
+
+        recent_observations = list(getattr(self, "observations", []) or [])
+        for obs in reversed(recent_observations):
+            if not isinstance(obs, dict):
+                continue
+            scene = self._normalize_scene_label(obs.get("scene", ""))
+            if scene == "未知":
+                scene = ""
+            window_title = self._normalize_window_title(
+                obs.get("active_window") or obs.get("window_title") or ""
+            )
+            description = self._truncate_preview_text(
+                obs.get("description", "") or obs.get("recognition_summary", ""),
+                limit=80,
+            )
+            if not any((scene, window_title, description)):
+                continue
+
+            signature = "|".join((scene, window_title, description))
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+
+            parts = []
+            if scene:
+                parts.append(f"场景：{scene}")
+            if window_title:
+                parts.append(f"窗口：{window_title}")
+            if description:
+                parts.append(f"识屏：{description}")
+
+            if parts:
+                context_lines.append("- " + "；".join(parts))
+            if len(context_lines) >= max_items:
+                break
+
+        return context_lines
+
+    def _build_end_response_prompt(self) -> str:
+        """为结束陪伴回复补充最近识屏上下文。"""
+        prompt = self._build_start_end_prompt(
+            self.end_llm_prompt,
+            action="end",
+        )
+        reference_lines = self._collect_start_end_reference_lines()
+        if not reference_lines:
+            return prompt
+
+        contextual_guidance = (
+            "\n补充要求：如果最近几轮明显围绕某个具体场景，"
+            "结束时可以顺着刚刚那段陪伴自然收尾，"
+            "比如轻轻提一下下次继续看、继续玩、继续写，"
+            "或者说有需要再叫你。"
+            "但必须严格基于下面这些最近记录，不要凭空编造共同经历。"
+            "\n最近几轮识屏与回复：\n"
+            + "\n".join(reference_lines)
+        )
+        return f"{prompt}{contextual_guidance}"
+
     async def _get_start_response(self, umo: str = None) -> str:
         """Build the startup reply text."""
         mode = "llm" if self.use_llm_for_start_end else "preset"
@@ -2143,10 +2300,7 @@ class ScreenCompanionMediaMixin:
             if provider:
                 try:
                     system_prompt = await self._get_persona_prompt(umo)
-                    prompt = self._build_start_end_prompt(
-                        self.end_llm_prompt,
-                        action="end",
-                    )
+                    prompt = self._build_end_response_prompt()
                     response = await asyncio.wait_for(
                         provider.text_chat(prompt=prompt, system_prompt=system_prompt),
                         timeout=60.0

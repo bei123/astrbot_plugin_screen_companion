@@ -6,8 +6,15 @@ astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能
 
 ## 版本
 
-当前版本：`2.8.0`
-`2.8.0` 版本已完成主文件拆分，并补上学习链路、模式感知、任务收尾感、学习回滚，以及日记提示词与排版优化等一整轮体验优化。当前重点已转向稳态维护和细节打磨。
+当前版本：`2.8.1`
+`2.8.1` 版本重点放在可安装性、WebUI 稳定性，以及开始/结束文案的自然度补强上。
+
+### 2.8.1 更新重点
+
+- 修复 Linux / Docker 场景通过 AstrBot 上传插件时，`pyaudio` 因缺少 `portaudio.h` 导致整个插件安装失败的问题。
+- 将麦克风监听依赖拆分为可选安装项；不启用麦克风监听时，不再因为 `PyAudio` 阻塞基础安装。
+- 修复 Windows 初装后刷新 WebUI 时偶发的 `name 'shutil' is not defined` 报错。
+- 当开始/结束文案使用 LLM 生成时，结束自动观察的回复会参考最近几条识屏结果与插件回复，让收尾语更贴近刚刚的场景。
 
 ## 主要功能
 
@@ -21,6 +28,7 @@ astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能
 - 模式感知：看片时更偏陪伴，编程/办公时更偏助手，深度专注时进一步降低主动打断。
 - 学习与纠偏：支持手动纠正、自然反馈学习、共同体验追问、误学回滚和学习开关矩阵。
 - 任务收尾感：在工作场景明显告一段落时，更容易顺势补一句下一步引导。
+- 开始/结束文案：支持固定文案或 LLM 生成；结束自动观察时会参考最近识屏上下文，让收尾更自然。
 - 长期记忆：保留窗口、场景、情节记忆和重复关注点，后续回复会优先召回相关记忆。
 - 今日日记：自动生成更自然的日记正文，并同步生成结构化摘要与观察时间线。
 - WebUI：查看运行状态、观察记录、活动统计、记忆，以及按“正文 - 概览 - 观察”拆开展示的日记信息。
@@ -38,7 +46,7 @@ astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能
 
 - 截图模式需要系统截图权限。
 - 录屏模式需要可用的 `ffmpeg`。
-- 如果启用麦克风监听，需要系统麦克风权限。
+- 如果启用麦克风监听，需要系统麦克风权限，并额外安装可选麦克风依赖。
 - 如果启用外部视觉 API，需要正确配置模型地址、密钥和模型名。
 
 ## 安装
@@ -49,13 +57,31 @@ astrbot_plugin_screen_companion 是面向 AstrBot 的屏幕伙伴插件。它能
 C:\Users\你的用户名\.astrbot\data\plugins\astrbot_plugin_screen_companion
 ```
 
-2. 安装依赖：
+2. 安装基础依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. 重启 AstrBot。
+如果你是通过 AstrBot 面板上传 zip 安装插件，这一步通常会自动执行。
+
+3. 如果你需要启用麦克风监听，再额外安装可选依赖：
+
+```bash
+pip install -r requirements-optional-mic.txt
+```
+
+Linux 上如果 `PyAudio` 安装失败，通常还需要先安装 `PortAudio` 开发包，例如：
+
+```bash
+# Ubuntu / Debian
+sudo apt install portaudio19-dev
+
+# CentOS / RHEL
+sudo yum install portaudio-devel
+```
+
+4. 重启 AstrBot。
 
 注意：插件目录名必须是 `astrbot_plugin_screen_companion`，不要带版本号后缀。
 
@@ -351,7 +377,7 @@ WebUI 当前适合做日常查看和排障：
 默认地址通常是：
 
 ```text
-http://127.0.0.1:1068
+http://127.0.0.1:6314
 ```
 
 ## 推荐关注的配置项
@@ -367,9 +393,13 @@ http://127.0.0.1:1068
 - `vision_api_key`
 - `vision_api_model`
 - `allow_unsafe_video_direct_fallback`
-- `webui_enabled`
-- `webui_host`
-- `webui_port`
+- `enable_mic_monitor`
+- `use_llm_for_start_end`
+- `end_llm_prompt`
+- `webui.enabled`
+- `webui.host`
+- `webui.port`
+- `webui.auth_enabled`
 - `enable_manual_correction_learning`
 - `enable_natural_feedback_learning`
 - `enable_shared_activity_followup`
@@ -380,6 +410,14 @@ http://127.0.0.1:1068
 ### `/kpr` 提示找不到 `ffmpeg`
 
 参考上述如何安装 ffmpeg。
+
+### 上传安装插件时报 `pyaudio` 或 `portaudio.h`
+
+这通常出现在 Linux / Docker 环境中，旧版本会因为麦克风依赖构建失败而导致整个插件安装失败。
+
+- 如果你不需要麦克风监听，直接升级到 `2.8.1` 后重新上传插件即可。
+- 如果你需要麦克风监听，请在基础安装完成后再额外执行：`pip install -r requirements-optional-mic.txt`
+- Linux 上如果 `PyAudio` 继续报错，通常还需要先安装 `PortAudio` 开发包，例如 `sudo apt install portaudio19-dev`
 
 ### 识屏分析失败
 
@@ -396,6 +434,22 @@ http://127.0.0.1:1068
 
 当前版本已经加入轻量采样，会优先抽关键帧降低超时概率。
 
+### WebUI 刷新时报 `name 'shutil' is not defined`
+
+这是旧版本运行状态接口里的已知问题，`2.8.1` 已修复。
+
+- 请确认插件实际更新到了 `2.8.1`
+- 更新后重启 AstrBot，再重新打开 WebUI
+- 如果日志里仍然是同样的旧报错，通常说明插件目录没有被新版本完全覆盖
+
+### 结束自动观察的回复不够贴场景
+
+如果你希望结束语像“下次也一起看电影哦”或“代码出问题再叫我”这种更贴当前场景的收尾：
+
+- 开启 `use_llm_for_start_end`
+- 根据角色风格调整 `end_llm_prompt`
+- 先让插件产生几条有效识屏记录；`2.8.1` 开始，LLM 结束文案会参考最近几条识屏结果与插件回复来收尾
+
 ## 隐私与安全
 
 - 截图、录屏、观察和记忆都可能包含你的屏幕内容，请只在信任的环境中使用。
@@ -404,6 +458,14 @@ http://127.0.0.1:1068
 - 确保 WebUI 访问密码安全，避免被他人获取。
 - 不要在公共网络上开启 WebUI，避免被他人访问。
 - 请合法使用，不要用于任何违法或不道德的目的。任何由于使用插件而导致的问题，插件作者不承担任何责任。
+
+## 许可证
+
+本项目采用 `GNU Affero General Public License v3.0`，即 `AGPL-3.0-or-later`。
+
+- 完整许可证文本见仓库根目录的 `LICENSE`
+- 简要版权声明见 `NOTICE`
+- 如果你修改后通过网络服务方式向其他用户提供本项目，也需要按 AGPL 的要求向这些用户提供对应源码
 
 ## 外部系统调用 API
 

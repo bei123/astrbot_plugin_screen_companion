@@ -1,0 +1,4 @@
+# 麦克风监听是可选功能，默认安装不会自动拉取这组依赖。
+# Linux / macOS 如安装 PyAudio 失败，请先安装系统层的 PortAudio。
+numpy
+pyaudio

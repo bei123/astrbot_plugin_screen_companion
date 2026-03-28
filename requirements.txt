@@ -1,7 +1,6 @@
+# 基础依赖；麦克风监听依赖见 requirements-optional-mic.txt
 pyautogui
 Pillow
-pyaudio
-numpy
 pygetwindow
 aiohttp
 psutil

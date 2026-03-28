@@ -77,6 +77,16 @@ class WebServer:
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
+    def _safe_plugin_call(self, name: str, default: Any = None, *args, **kwargs):
+        method = getattr(self.plugin, name, None)
+        if not callable(method):
+            return default
+        try:
+            return method(*args, **kwargs)
+        except Exception as e:
+            logger.warning(f"调用插件方法 {name} 失败，已回退默认值: {e}")
+            return default
+
     # === 响应辅助方法 ====
 
     @staticmethod
@@ -964,8 +974,8 @@ class WebServer:
         """Return basic config metadata."""
         try:
             return self._ok({
-            "version": "2.8.0",
-            "plugin_version": "2.8.0"
+                "version": "2.8.1",
+                "plugin_version": "2.8.1"
             })
         except Exception as e:
             logger.error(f"Error getting config: {e}")
@@ -1319,8 +1329,8 @@ class WebServer:
             {
                 "status": "ok",
                 "service": "screen-companion-webui",
-            "version": "2.8.0",
-            "plugin_version": "2.8.0",
+                "version": "2.8.1",
+                "plugin_version": "2.8.1",
                 "host": self.host,
                 "port": self.port,
                 "auth_enabled": bool(self._get_expected_secret()),
@@ -1333,7 +1343,16 @@ class WebServer:
         )
 
     def _build_runtime_status(self) -> dict[str, Any]:
-        current_interval, current_probability = self.plugin._get_current_preset_params()
+        default_interval = getattr(self.plugin, "check_interval", 0)
+        default_probability = getattr(self.plugin, "trigger_probability", 0)
+        preset_params = self._safe_plugin_call(
+            "_get_current_preset_params",
+            (default_interval, default_probability),
+        )
+        if isinstance(preset_params, (list, tuple)) and len(preset_params) >= 2:
+            current_interval, current_probability = preset_params[0], preset_params[1]
+        else:
+            current_interval, current_probability = default_interval, default_probability
         presets = []
         for index, preset in enumerate(getattr(self.plugin, "parsed_custom_presets", []) or []):
             presets.append(
@@ -1348,9 +1367,17 @@ class WebServer:
 
         latest_screenshot = self._build_latest_media_info("image")
         latest_video = self._build_latest_media_info("video")
-        recent_screen_analyses = []
-        if hasattr(self.plugin, "_get_recent_screen_analysis_traces"):
-            recent_screen_analyses = self.plugin._get_recent_screen_analysis_traces(limit=6) or []
+        recent_screen_analyses = self._safe_plugin_call(
+            "_get_recent_screen_analysis_traces",
+            [],
+            limit=6,
+        ) or []
+        screen_recognition_mode = bool(
+            self._safe_plugin_call("_use_screen_recording_mode", False)
+        )
+        recording_video_encoder = (
+            self._safe_plugin_call("_get_recording_video_encoder", "") or ""
+        )
 
         return {
             "enabled": self._plugin_bool("enabled"),
@@ -1375,8 +1402,8 @@ class WebServer:
             "battery_threshold": getattr(self.plugin, "battery_threshold", 20),
             "debug": self._plugin_bool("debug"),
             "save_local": self._plugin_bool("save_local"),
-            "screen_recognition_mode": bool(self.plugin._use_screen_recording_mode()),
-            "recording_video_encoder": getattr(self.plugin, "_get_recording_video_encoder", lambda: "")() or "",
+            "screen_recognition_mode": screen_recognition_mode,
+            "recording_video_encoder": recording_video_encoder,
             "use_external_vision": self._plugin_bool("use_external_vision"),
             "use_shared_screenshot_dir": self._plugin_bool("use_shared_screenshot_dir"),
             "shared_screenshot_dir": getattr(self.plugin, "shared_screenshot_dir", "") or "",
